@@ -193,14 +193,25 @@ def write_env_file(path, values):
         die(f"cannot write {path}: {e.strerror}. If this file comes from sops-nix/agenix, change it there instead")
 
 
-def parse_kv(items, what):
+def parse_kv(items, what, prompt=False):
+    """KEY=VALUE pairs; with prompt=True a bare KEY asks for the value with
+    hidden input, so secrets never have to pass through the shell history."""
     out = {}
     for item in items or []:
-        if "=" not in item:
+        if "=" in item:
+            k, v = item.split("=", 1)
+        elif prompt:
+            k, v = item, None
+        else:
             die(f"{what} must be KEY=VALUE, got '{item}'")
-        k, v = item.split("=", 1)
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
             die(f"invalid {what} name '{k}'")
+        if v is None:
+            if not sys.stdin.isatty():
+                die(f"{what} {k}: no value given and stdin is not a terminal")
+            v = getpass.getpass(f"  {k}: ")
+            if not v:
+                die(f"{what} {k}: empty value")
         out[k] = v
     return out
 
@@ -353,7 +364,7 @@ def cmd_add(state, args):
     if os.path.exists(path):
         die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
 
-    secrets = prompt_secrets(state, parse_kv(args.secret, "--secret"), args.no_prompt)
+    secrets = prompt_secrets(state, parse_kv(args.secret, "--secret", prompt=True), args.no_prompt)
 
     os.makedirs(reg, exist_ok=True)
     with open(path, "w") as f:
@@ -483,7 +494,7 @@ def cmd_secrets(state, args):
         return
     if args.sub == "set":
         values = read_env_file(path)
-        values.update(parse_kv(args.pairs, "secret"))
+        values.update(parse_kv(args.pairs, "secret", prompt=True))
         write_env_file(path, values)
         print(f"updated {path}")
     elif args.sub == "edit":
@@ -533,7 +544,7 @@ def build_parser():
     s.add_argument("--env", action="append", metavar="K=V", help="non-secret environment variable (repeatable)")
     s.add_argument("--set", action="append", metavar="KEY=VAL", help="Hermes config.yaml key, dotted keys allowed; integers and true/false become TOML literals (repeatable)")
     s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
-    s.add_argument("--secret", action="append", metavar="K=V", help="set a provider key now instead of being prompted (repeatable)")
+    s.add_argument("--secret", action="append", metavar="KEY[=VALUE]", help="a key to store; without =VALUE you are prompted for it, which keeps it out of the shell history (repeatable)")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
     s.add_argument("--no-rebuild", action="store_true", help="write the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_add)
@@ -567,9 +578,9 @@ def build_parser():
     s = sub.add_parser("secrets", help="manage the agent's provider keys")
     ss = s.add_subparsers(dest="sub", metavar="<set|edit|list>")
     ss.required = True
-    x = ss.add_parser("set", help="create or update KEY=VALUE pairs; restarts a running agent")
+    x = ss.add_parser("set", help="create or update secrets; a bare KEY is prompted for; restarts a running agent")
     x.add_argument("name")
-    x.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
+    x.add_argument("pairs", nargs="+", metavar="KEY[=VALUE]")
     x = ss.add_parser("edit", help="open the secrets file in $EDITOR")
     x.add_argument("name")
     x = ss.add_parser("list", help="print secret names, never values")

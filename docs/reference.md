@@ -29,8 +29,8 @@ localpart = "scout2"                   # only if @scout was deactivated earlier
 `agentctl add` writes this file from its flags: `--model`, `--description`,
 `--memory-max`, `--cpu-quota`, `--package` (repeatable), `--env K=V`,
 `--set key=value` (dotted keys; integers and `true`/`false` become TOML
-literals, `--set-str` keeps a string), `--secret K=V` or the interactive
-prompt, `--no-rebuild`.
+literals, `--set-str` keeps a string), `--secret KEY` (prompted) or
+`--secret KEY=VALUE`, `--no-rebuild`.
 
 Everything in the registry, including `[settings]` and `[environment]`, is
 copied into the world-readable Nix store. Keys and tokens go in the secrets
@@ -59,9 +59,10 @@ file, never there.
 ## Secrets
 
 `secrets.env` is created empty, root-owned, mode 0400, and must exist; systemd
-refuses to start the service without it. `agentctl secrets set NAME K=V`
-writes it in the `KEY="value"` dialect systemd reads and restarts a running
-agent; `edit` opens it in `$EDITOR`; `list` prints key names only. Hermes
+refuses to start the service without it. `agentctl secrets set NAME KEY`
+prompts for the value with hidden input (`KEY=VALUE` also works, at the cost
+of your shell history), writes it in the `KEY="value"` dialect systemd reads
+and restarts a running agent; `edit` opens it in `$EDITOR`; `list` prints key names only. Hermes
 picks its provider from whichever of `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`
 or `OPENAI_API_KEY` is set.
 
@@ -77,7 +78,8 @@ sudo agentctl add scout --model <model id as the provider names it> \
   --set model.provider=custom \
   --set model.base_url=https://api.example.net/v1 \
   --set model.key_env=EXAMPLE_API_KEY \
-  --secret EXAMPLE_API_KEY=...
+  --secret EXAMPLE_API_KEY --no-prompt
+  EXAMPLE_API_KEY: ********
 ```
 
 which writes
@@ -90,7 +92,9 @@ key_env = "EXAMPLE_API_KEY"
 ```
 
 `--secret` and `agentctl secrets set` accept any variable name, not only the
-three that are prompted for.
+three that are prompted for by default. A bare `KEY` asks for the value with
+hidden input; `KEY=VALUE` is accepted for scripts, but it leaves the key in
+your shell history.
 
 ## The sandbox
 
