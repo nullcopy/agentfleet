@@ -66,6 +66,23 @@
               ./checks/example-host.nix
             ];
           };
+          # A freshly installed host: registry configured, no agents yet.
+          # agentctl and state.json must still be there.
+          fresh = nixpkgs.lib.nixosSystem {
+            modules = [
+              { nixpkgs.hostPlatform = system; }
+              self.nixosModules.default
+              ./checks/example-host.nix
+              {
+                services.agentfleet.agents = nixpkgs.lib.mkForce { };
+                services.agentfleet.registry.dir = nixpkgs.lib.mkForce ./checks/empty-registry;
+              }
+            ];
+          };
+          freshOk =
+            assert fresh.config.services.agentfleet.enable;
+            assert builtins.any (p: (p.pname or "") == "agentctl") fresh.config.environment.systemPackages;
+            fresh.config.environment.etc."agents/state.json".text;
         in
         {
           # Evaluates every built-in recipe and renders the units. The string
@@ -73,6 +90,8 @@
           eval = pkgs.writeText "agentfleet-eval" (
             builtins.unsafeDiscardStringContext (
               example.config.environment.etc."agents/state.json".text
+              + "\n"
+              + freshOk
               + "\n"
               + builtins.concatStringsSep "\n" (
                 nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent-") (

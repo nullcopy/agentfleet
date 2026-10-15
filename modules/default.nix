@@ -627,9 +627,12 @@ in
   options.services.agentfleet = {
     enable = mkOption {
       type = types.bool;
-      default = allAgents != { };
-      defaultText = lib.literalExpression "<any agent defined in Nix or in the registry>";
-      description = "Deploy the agents declared below. On by default when any agent is defined.";
+      default = cfg.registry.dir != null || allAgents != { };
+      defaultText = lib.literalExpression "services.agentfleet.registry.dir != null || <any agent defined>";
+      description = ''
+        Install agentctl and deploy the agents declared below. On by default
+        as soon as a registry directory is configured or any agent is defined.
+      '';
     };
 
     agents = mkOption {
