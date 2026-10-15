@@ -1,0 +1,5 @@
+harness = "custom"
+description = "defined in TOML"
+
+[settings]
+exec = "/run/current-system/sw/bin/sleep infinity"
