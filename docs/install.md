@@ -108,7 +108,12 @@ services.agentfleet = {
     listenAddresses = [ "10.0.0.2" ];                 # CHANGE: this host's address as the proxy sees it
   };
 };
+```
 
+And this, as a separate top-level setting, not inside the
+`services.agentfleet` block:
+
+```nix
 # NixOS blocks inbound connections by default; this opens port 8008, but
 # only on the network interface that carries the private address above, so
 # the proxy host can reach Synapse and the internet cannot.
