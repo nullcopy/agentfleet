@@ -3,7 +3,6 @@
   python3,
   stdenvNoCC,
   makeWrapper,
-  util-linux,
   systemd,
   git,
 }:
@@ -21,7 +20,6 @@ stdenvNoCC.mkDerivation {
       --prefix PATH : ${
         lib.makeBinPath [
           python3
-          util-linux
           systemd
           git
         ]

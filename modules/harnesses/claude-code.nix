@@ -3,6 +3,10 @@
 #
 # claude-code is unfree in nixpkgs. Allow it on the host with e.g.
 #   nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+#
+# Claude Code's optional tool sandbox uses bubblewrap, which needs user
+# namespaces; the default sandbox forbids them (RestrictNamespaces). To use
+# it, set `services.agentfleet.harnesses.claude-code.sandbox = _: { RestrictNamespaces = false; };`.
 {
   config,
   lib,
@@ -11,7 +15,7 @@
 }:
 
 {
-  services.agents.harnesses.claude-code = {
+  services.agentfleet.harnesses.claude-code = {
     description = "Claude Code CLI; on-demand, no service";
     package = lib.mkDefault pkgs.claude-code;
 

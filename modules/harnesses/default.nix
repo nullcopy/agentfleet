@@ -1,5 +1,5 @@
 # Built-in harness recipes. Each file registers one entry under
-# services.agents.harnesses.<name>. Add your own by writing a module that sets
+# services.agentfleet.harnesses.<name>. Add your own by writing a module that sets
 # another entry; see README "Writing a harness".
 {
   imports = [

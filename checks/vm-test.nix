@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
     {
       imports = [ self.nixosModules.core ];
 
-      services.agents = {
+      services.agentfleet = {
         flakeDir = "/root/flake";
         rebuildCommand = "echo would-run nixos-rebuild {action}";
         registry.dir = ./vm-registry;
@@ -26,6 +26,7 @@ pkgs.testers.runNixOSTest {
         agents.tool = {
           harness = "custom";
           description = "on-demand";
+          packages = [ pkgs.util-linux ];
         };
       };
     };
@@ -62,9 +63,14 @@ pkgs.testers.runNixOSTest {
     assert "sleeper" in out and "active" in out and "on-demand" in out
     assert machine.succeed("agentctl run tool -- id -un").strip() == "agent-tool"
     assert machine.succeed("agentctl run tool -- sh -c 'echo $AGENT_NAME:$HOME'").strip() == "tool:/srv/agents/tool"
-    machine.succeed("agentctl secrets set tool FOO=bar")
-    assert machine.succeed("agentctl secrets list tool").strip() == "FOO"
-    assert machine.succeed("agentctl run tool -- sh -c 'echo $FOO'").strip() == "bar"
+    machine.succeed("agentctl secrets set tool FOO='p@$s\"w' BAR=plain")
+    assert machine.succeed("agentctl secrets list tool").split() == ["BAR", "FOO"]
+    assert machine.succeed("agentctl run tool -- sh -c 'echo \"$FOO\"'").strip() == 'p@$s"w'
+    # on-demand commands run inside the same sandbox as the units
+    machine.fail("agentctl run tool -- touch /usr/agentfleet-escaped")
+    machine.succeed("agentctl run tool -- touch /srv/agents/tool/ok")
+    machine.fail("agentctl run tool -- unshare -U true")  # RestrictNamespaces
+    assert ".bash_profile ->" in machine.succeed("ls -l /srv/agents/tool/.bash_profile")  # managed = symlink
 
     machine.succeed("mkdir -p /root/flake/agents && git -C /root/flake init -q")
     out = machine.succeed("agentctl add demo --harness custom --no-prompt --set exec=/bin/true --env A=1 --memory-max 1G")
@@ -73,6 +79,9 @@ pkgs.testers.runNixOSTest {
     assert 'harness = "custom"' in toml and "[settings]" in toml and 'exec = "/bin/true"' in toml
     machine.succeed("git -C /root/flake ls-files --error-unmatch agents/demo.toml")
 
+    out = machine.succeed("agentctl rm demo --yes")
+    assert "would-run nixos-rebuild switch" in out
+    machine.fail("test -e /root/flake/agents/demo.toml")
     machine.fail("agentctl rm sleeper --yes")  # defined in Nix, not removable
   '';
 }

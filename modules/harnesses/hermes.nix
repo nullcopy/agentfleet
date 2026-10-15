@@ -2,7 +2,7 @@
 #
 # The package is not in nixpkgs; agentfleet.nixosModules.default wires it from
 # the hermes-agent flake input. If you import nixosModules.core instead, set
-# services.agents.harnesses.hermes.package yourself.
+# services.agentfleet.harnesses.hermes.package yourself.
 {
   config,
   lib,
@@ -10,12 +10,14 @@
 }:
 
 let
-  cfg = config.services.agents;
+  cfg = config.services.agentfleet;
   h = cfg.harnesses.hermes;
-  usedBy = lib.filterAttrs (_: a: a.enable && a.harness == "hermes") cfg.agents;
+  usedBy = lib.filterAttrs (_: a: a.enable && a.harness == "hermes") (
+    cfg.agents // cfg.registry.agents
+  );
 in
 {
-  services.agents.harnesses.hermes = {
+  services.agentfleet.harnesses.hermes = {
     description = "Hermes Agent gateway (Nous Research); long-running, chat-platform driven";
 
     secrets = [
@@ -68,7 +70,7 @@ in
   assertions = [
     {
       assertion = usedBy == { } || h.package != null;
-      message = "agentfleet: agents ${lib.concatStringsSep ", " (lib.attrNames usedBy)} use harness 'hermes' but services.agents.harnesses.hermes.package is unset. Import agentfleet.nixosModules.default (which sets it from the hermes-agent flake input) or set it explicitly.";
+      message = "agentfleet: agents ${lib.concatStringsSep ", " (lib.attrNames usedBy)} use harness 'hermes' but services.agentfleet.harnesses.hermes.package is unset. Import agentfleet.nixosModules.default (which sets it from the hermes-agent flake input) or set it explicitly.";
     }
   ];
 }

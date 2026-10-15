@@ -16,17 +16,26 @@
 }:
 
 let
-  h = config.services.agents.harnesses.openclaw;
+  cfg = config.services.agentfleet;
+  h = cfg.harnesses.openclaw;
+  usedBy = lib.filterAttrs (_: a: a.enable && a.harness == "openclaw") (
+    cfg.agents // cfg.registry.agents
+  );
 in
 {
-  services.agents.harnesses.openclaw = {
+  services.agentfleet.harnesses.openclaw = {
     description = "OpenClaw gateway; long-running, multi-channel";
+    # Null on a nixpkgs without openclaw, so hosts that do not use this
+    # harness still evaluate.
     package = lib.mkDefault (
-      pkgs.openclaw.overrideAttrs (old: {
-        meta = (old.meta or { }) // {
-          knownVulnerabilities = [ ];
-        };
-      })
+      if pkgs ? openclaw then
+        pkgs.openclaw.overrideAttrs (old: {
+          meta = (old.meta or { }) // {
+            knownVulnerabilities = [ ];
+          };
+        })
+      else
+        null
     );
 
     secrets = [
@@ -66,18 +75,25 @@ in
       ".openclaw/openclaw.json" = {
         mode = "seed";
         text = builtins.toJSON (
-          lib.recursiveUpdate (
-            {
-              gateway = {
-                bind = "loopback";
-                auth.mode = "token";
-              };
-              agents.defaults.workspace = "${ag.home}/.openclaw/workspace";
+          lib.recursiveUpdate {
+            gateway = {
+              bind = "loopback";
+              auth.mode = "token";
+            };
+            agents.defaults = {
+              workspace = "${ag.home}/.openclaw/workspace";
             }
-            // lib.optionalAttrs (ag.model != null) { agents.defaults.model.primary = ag.model; }
-          ) ag.settings
+            // lib.optionalAttrs (ag.model != null) { model.primary = ag.model; };
+          } ag.settings
         );
       };
     };
   };
+
+  assertions = [
+    {
+      assertion = usedBy == { } || h.package != null;
+      message = "agentfleet: agents ${lib.concatStringsSep ", " (lib.attrNames usedBy)} use harness 'openclaw' but services.agentfleet.harnesses.openclaw.package is unset (this nixpkgs has no openclaw); set it explicitly.";
+    }
+  ];
 }

@@ -32,13 +32,13 @@
           { pkgs, lib, ... }:
           {
             imports = [ self.nixosModules.core ];
-            services.agents.harnesses.hermes.package =
+            services.agentfleet.harnesses.hermes.package =
               lib.mkDefault
                 hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;
           };
 
         # Module + built-in recipes, no flake-input packages. Set
-        # services.agents.harnesses.hermes.package yourself if you use Hermes.
+        # services.agentfleet.harnesses.hermes.package yourself if you use Hermes.
         core = {
           imports = [
             ./modules
@@ -68,13 +68,16 @@
           };
         in
         {
-          # Evaluates every built-in recipe and renders the units; no build.
+          # Evaluates every built-in recipe and renders the units. The string
+          # context is dropped so the agents' profiles are not built.
           eval = pkgs.writeText "agentfleet-eval" (
-            example.config.environment.etc."agents/state.json".text
-            + "\n"
-            + builtins.concatStringsSep "\n" (
-              nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent-") (
-                builtins.attrNames example.config.systemd.services
+            builtins.unsafeDiscardStringContext (
+              example.config.environment.etc."agents/state.json".text
+              + "\n"
+              + builtins.concatStringsSep "\n" (
+                nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent-") (
+                  builtins.attrNames example.config.systemd.services
+                )
               )
             )
           );

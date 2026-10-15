@@ -8,7 +8,7 @@
 { lib, ... }:
 
 {
-  services.agents.harnesses.custom = {
+  services.agentfleet.harnesses.custom = {
     description = "Any command; configure via settings.exec / settings.init";
     exec = ag: ag.settings.exec or null;
     init = ag: ag.settings.init or "";

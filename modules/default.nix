@@ -1,34 +1,32 @@
 # agentfleet — core NixOS module.
 #
-# Declares `services.agents`: a set of AI agents, each running as its own
+# Declares `services.agentfleet`: a set of AI agents, each running as its own
 # locked-down system user with its own home, systemd service and secrets
 # file. Harness-specific knowledge (how to run Hermes,
 # OpenClaw, Claude Code, ...) lives in modules/harnesses/*.nix, which register
-# themselves under `services.agents.harnesses.<name>`.
+# themselves under `services.agentfleet.harnesses.<name>`.
 #
 # Agents come from two places and are merged:
-#   1. `services.agents.agents.<name> = { ... }`   — plain Nix
-#   2. `services.agents.registry.dir = ./agents;`  — one TOML file per agent,
-#      which is what the `agentctl` CLI reads and writes.
+#   1. `services.agentfleet.agents.<name> = { ... }`   — plain Nix
+#   2. `services.agentfleet.registry.dir = ./agents;`  — one TOML file per
+#      agent, which is what the `agentctl` CLI reads and writes.
 #
 # Everything agentctl needs at runtime is rendered to /etc/agents/state.json,
 # so the CLI stays a dumb, portable script with no Nix knowledge.
 {
   config,
-  options,
   lib,
   pkgs,
   ...
 }:
 
 let
-  cfg = config.services.agents;
+  cfg = config.services.agentfleet;
 
   inherit (lib)
     mkOption
     mkIf
     mkMerge
-    mkDefault
     types
     mapAttrs
     mapAttrs'
@@ -36,10 +34,8 @@ let
     nameValuePair
     filterAttrs
     attrNames
-    attrValues
     concatStringsSep
     optional
-    optionals
     optionalString
     optionalAttrs
     hasSuffix
@@ -49,7 +45,10 @@ let
     splitString
     ;
 
+  # Also exported in state.json so agentctl validates names the same way.
   nameRegex = "[a-z][a-z0-9-]{0,30}";
+  # Linux (and useradd) cap user names at 32 characters.
+  maxUserLength = 32;
 
   ## ----- TOML registry -------------------------------------------------------
   # One file per agent: <registry.dir>/<name>.toml. Keys are snake_case in TOML
@@ -76,15 +75,12 @@ let
 
   fromToml =
     fname: t:
-    (mapAttrs' (
+    mapAttrs' (
       k: v:
       nameValuePair (tomlKeyMap.${k}
         or (throw "agentfleet: unknown key '${k}' in registry file ${fname} (known: ${concatStringsSep ", " (attrNames tomlKeyMap)})")
       ) v
-    ) t)
-    // {
-      source = "toml";
-    };
+    ) t;
 
   tomlAgents = mapAttrs' (
     fname: _:
@@ -126,9 +122,10 @@ let
         ];
         default = "seed";
         description = ''
-          `seed`: written only if the file does not exist yet, so the harness
-          and the agent may edit it afterwards. `managed`: overwritten on every
-          activation; edits by the agent are lost.
+          `seed`: a real file, written only if it does not exist yet, so the
+          harness and the agent may edit it afterwards. `managed`: a symlink
+          into the Nix store, replaced on every activation; the agent cannot
+          edit it and `perms` is ignored.
         '';
       };
       perms = mkOption {
@@ -138,6 +135,15 @@ let
       };
     };
   };
+
+  # Plain values only: they are rendered both into the unit and into
+  # state.json for `systemd-run -p`.
+  sandboxValue = types.oneOf [
+    types.bool
+    types.int
+    types.str
+    (types.listOf types.str)
+  ];
 
   harnessModule = types.submodule {
     options = {
@@ -184,10 +190,21 @@ let
         default = _: { };
         description = "agent -> files to render into the agent's home (paths relative to home).";
       };
+      sandbox = mkOption {
+        type = types.functionTo (types.attrsOf sandboxValue);
+        default = _: { };
+        example = lib.literalExpression "_: { RestrictNamespaces = false; }";
+        description = ''
+          agent -> overrides for the built-in systemd sandbox. Applied to the
+          service, the init unit and to `agentctl run`/`shell` alike. Use it
+          when a harness needs something the defaults forbid, for example
+          user namespaces for its own bubblewrap tool sandbox.
+        '';
+      };
       serviceConfig = mkOption {
         type = types.functionTo types.attrs;
         default = _: { };
-        description = "agent -> extra systemd serviceConfig for the main service.";
+        description = "agent -> extra systemd serviceConfig for the main service only.";
       };
       shellInit = mkOption {
         type = types.functionTo types.lines;
@@ -203,7 +220,7 @@ let
       options = {
         harness = mkOption {
           type = types.str;
-          description = "Name of a harness under services.agents.harnesses.";
+          description = "Name of a harness under services.agentfleet.harnesses.";
         };
         enable = mkOption {
           type = types.bool;
@@ -245,7 +262,11 @@ let
         settings = mkOption {
           type = types.attrs;
           default = { };
-          description = "Harness-specific settings, merged into the harness's own config file.";
+          description = ''
+            Harness-specific settings, merged into the harness's own config
+            file. Ends up in the world-readable Nix store: never put secrets
+            here, use the secrets file.
+          '';
         };
         description = mkOption {
           type = types.str;
@@ -255,10 +276,11 @@ let
         secretsFile = mkOption {
           type = types.str;
           default = "${cfg.stateDir}/${name}/secrets.env";
-          defaultText = lib.literalExpression ''"''${services.agents.stateDir}/<name>/secrets.env"'';
+          defaultText = lib.literalExpression ''"''${services.agentfleet.stateDir}/<name>/secrets.env"'';
           description = ''
             KEY=VALUE file loaded into the service and into `agentctl run/shell`.
             Point this at a sops-nix or agenix secret to manage it declaratively.
+            The file must exist; the default one is created empty.
           '';
         };
         extraServiceConfig = mkOption {
@@ -266,16 +288,17 @@ let
           default = { };
           description = "Extra systemd serviceConfig merged last into the main service.";
         };
-        source = mkOption {
-          type = types.str;
-          default = "nix";
-          internal = true;
-          description = "Where this definition came from (nix or toml).";
-        };
       };
     };
 
   ## ----- resolution ----------------------------------------------------------
+  # Nix-defined and registry agents, tagged with where they came from.
+  allAgents =
+    mapAttrs (_: a: a // { source = "nix"; }) cfg.agents
+    // mapAttrs (_: a: a // { source = "toml"; }) cfg.registry.agents;
+
+  clashingNames = lib.intersectLists (attrNames cfg.agents) (attrNames cfg.registry.agents);
+
   resolvePkg =
     p:
     if builtins.isString p then
@@ -322,18 +345,7 @@ let
     in
     self;
 
-  # Names defined in Nix by anyone other than this module's own TOML import,
-  # so a clash between the two sources can be reported instead of merged.
-  nixDefinedNames = lib.unique (
-    lib.concatMap (d: attrNames d.value) (
-      builtins.filter (
-        d: d.file != toString ./default.nix
-      ) options.services.agents.agents.definitionsWithLocations
-    )
-  );
-  clashingNames = lib.intersectLists nixDefinedNames (attrNames tomlAgents);
-
-  enabledAgents = filterAttrs (_: a: a.enable && cfg.harnesses ? ${a.harness}) cfg.agents;
+  enabledAgents = filterAttrs (_: a: a.enable && cfg.harnesses ? ${a.harness}) allAgents;
   agents = mapAttrs resolve enabledAgents;
   serviceAgents = filterAttrs (_: ag: ag.exec != null) agents;
 
@@ -380,62 +392,123 @@ let
 
   allFiles = ag: defaultFiles ag // ag.harnessCfg.files ag;
 
-  installFile =
-    ag: rel: f:
+  # "a/b/c" -> [ "a" "a/b" ]
+  parentDirs =
+    rel:
     let
-      src = pkgs.writeText "agent-${ag.name}-${baseNameOf rel}" f.text;
-      dst = "${ag.home}/${rel}";
-      parent = dirOf rel;
-      mkParents = optionalString (parent != ".") ''
-        agentfleet_mkdirs ${ag.user} ${ag.group} ${escapeShellArg ag.home} ${escapeShellArg parent}
-      '';
-      inst = "install -o ${ag.user} -g ${ag.group} -m ${f.perms} ${src} ${escapeShellArg dst}";
+      parts = lib.init (splitString "/" rel);
     in
-    if f.mode == "managed" then
-      ''
-        ${mkParents}
-        ${inst}
-      ''
-    else
-      ''
-        if [ ! -e ${escapeShellArg dst} ]; then
-          ${mkParents}
-          ${inst}
-        fi
-      '';
+    lib.genList (i: concatStringsSep "/" (lib.take (i + 1) parts)) (builtins.length parts);
 
-  activationFor = ag: ''
-    # ---- agent ${ag.name} ----
-    install -d -o ${ag.user} -g ${ag.group} -m 0750 ${escapeShellArg ag.home}
-    install -d -o root -g root -m 0700 ${escapeShellArg ag.stateDir}
-    ${optionalString (ag.secretsFile == "${ag.stateDir}/secrets.env") ''
-      if [ ! -e ${escapeShellArg ag.secretsFile} ]; then
-        install -o root -g root -m 0400 /dev/null ${escapeShellArg ag.secretsFile}
-      fi
-    ''}
-    ${concatStringsSep "\n" (mapAttrsToList (installFile ag) (allFiles ag))}
-  '';
+  ownedDir = ag: {
+    d = {
+      user = ag.user;
+      group = ag.group;
+      mode = "0750";
+    };
+  };
+
+  # systemd-tmpfiles rules: directories, the default secrets file, and the
+  # harness files. `C` copies only when the destination is missing (seed);
+  # `L+` (re)points a symlink at the store every time (managed). Note that
+  # `C+` would not replace an existing file.
+  tmpfilesFor =
+    ag:
+    {
+      ${ag.home} = ownedDir ag;
+      ${ag.stateDir}.d = {
+        user = "root";
+        group = "root";
+        mode = "0700";
+      };
+    }
+    // optionalAttrs (ag.secretsFile == "${ag.stateDir}/secrets.env") {
+      ${ag.secretsFile}.f = {
+        user = "root";
+        group = "root";
+        mode = "0400";
+      };
+    }
+    // lib.foldl' (acc: x: acc // x) { } (
+      mapAttrsToList (
+        rel: f:
+        lib.genAttrs (map (d: "${ag.home}/${d}") (parentDirs rel)) (_: ownedDir ag)
+        // {
+          "${ag.home}/${rel}" =
+            let
+              src = toString (pkgs.writeText "agent-${ag.name}-${baseNameOf rel}" f.text);
+            in
+            if f.mode == "managed" then
+              {
+                "L+" = {
+                  argument = src;
+                  user = ag.user;
+                  group = ag.group;
+                };
+              }
+            else
+              {
+                C = {
+                  argument = src;
+                  user = ag.user;
+                  group = ag.group;
+                  mode = f.perms;
+                };
+              };
+        }
+      ) (allFiles ag)
+    );
 
   ## ----- systemd -------------------------------------------------------------
-  hardening = ag: {
-    NoNewPrivileges = true;
-    ProtectSystem = "strict";
-    # ProtectHome hides /home entirely; only safe when agents live elsewhere.
-    ProtectHome = !(hasPrefix "/home" cfg.homeBase);
-    ReadWritePaths = [ ag.home ];
-    PrivateTmp = true;
-    ProtectKernelTunables = true;
-    ProtectKernelModules = true;
-    ProtectKernelLogs = true;
-    ProtectControlGroups = true;
-    ProtectClock = true;
-    ProtectHostname = true;
-    RestrictSUIDSGID = true;
-    RestrictRealtime = true;
-    RestrictNamespaces = true;
-    LockPersonality = true;
-    UMask = "0077";
-  };
+  # One sandbox definition for everything that runs as the agent: the main
+  # service, the init unit, and `agentctl run`/`shell` (via systemd-run, see
+  # state.json below). Harnesses adjust it through their `sandbox` option.
+  sandboxOf =
+    ag:
+    {
+      NoNewPrivileges = true;
+      CapabilityBoundingSet = "";
+      ProtectSystem = "strict";
+      # ProtectHome hides /home entirely; only safe when agents live elsewhere.
+      ProtectHome = !(hasPrefix "/home" cfg.homeBase);
+      ReadWritePaths = [ ag.home ];
+      PrivateTmp = true;
+      PrivateDevices = true;
+      ProtectProc = "invisible";
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectKernelLogs = true;
+      ProtectControlGroups = true;
+      ProtectClock = true;
+      ProtectHostname = true;
+      RestrictSUIDSGID = true;
+      RestrictRealtime = true;
+      # Blocks user namespaces too, so a harness that sandboxes its own tool
+      # calls with bwrap/unshare must set `sandbox = _: { RestrictNamespaces = false; }`.
+      RestrictNamespaces = true;
+      # AF_NETLINK: getifaddrs(), which Node and Python call when binding.
+      RestrictAddressFamilies = [
+        "AF_UNIX"
+        "AF_INET"
+        "AF_INET6"
+        "AF_NETLINK"
+      ];
+      SystemCallArchitectures = "native";
+      LockPersonality = true;
+      UMask = "0077";
+    }
+    // ag.harnessCfg.sandbox ag;
+
+  # The same attrset as `Key=Value` strings for `systemd-run -p`.
+  unitValue =
+    v:
+    if builtins.isBool v then
+      (if v then "yes" else "no")
+    else if builtins.isList v then
+      concatStringsSep " " v
+    else
+      toString v;
+  sandboxProps = ag: mapAttrsToList (k: v: "${k}=${unitValue v}") (sandboxOf ag);
 
   initService = ag: {
     description = "agentfleet: first-run initialisation for agent ${ag.name}";
@@ -451,9 +524,9 @@ let
       User = ag.user;
       Group = ag.group;
       WorkingDirectory = ag.home;
-      EnvironmentFile = "-${ag.secretsFile}";
+      EnvironmentFile = ag.secretsFile;
     }
-    // hardening ag;
+    // sandboxOf ag;
     script = ''
       set -euo pipefail
       ${ag.harnessCfg.init ag}
@@ -480,11 +553,11 @@ let
           Group = ag.group;
           WorkingDirectory = ag.home;
           ExecStart = ag.exec;
-          EnvironmentFile = "-${ag.secretsFile}";
+          EnvironmentFile = ag.secretsFile;
           Restart = "on-failure";
           RestartSec = 5;
         }
-        // hardening ag
+        // sandboxOf ag
         // optionalAttrs (ag.raw.memoryMax != null) { MemoryMax = ag.raw.memoryMax; }
         // optionalAttrs (ag.raw.cpuQuota != null) { CPUQuota = ag.raw.cpuQuota; }
       )
@@ -503,6 +576,7 @@ let
       flakeDir
       rebuildCommand
       ;
+    inherit nameRegex maxUserLength;
     registry = {
       hostPath = cfg.registry.hostPath;
       enabled = cfg.registry.dir != null;
@@ -530,6 +604,7 @@ let
         env = ag.envVars;
         path = "${profileOf ag}/bin";
         shell = "${pkgs.bashInteractive}/bin/bash";
+        sandbox = sandboxProps ag;
       }) agents
       // mapAttrs (name: a: {
         enabled = false;
@@ -544,16 +619,16 @@ let
         stateDir = "${cfg.stateDir}/${name}";
         secretsFile = a.secretsFile;
         service = null;
-      }) (filterAttrs (_: a: !a.enable) cfg.agents);
+      }) (filterAttrs (_: a: !a.enable) allAgents);
   };
 
 in
 {
-  options.services.agents = {
+  options.services.agentfleet = {
     enable = mkOption {
       type = types.bool;
-      default = cfg.agents != { };
-      defaultText = lib.literalExpression "services.agents.agents != { }";
+      default = allAgents != { };
+      defaultText = lib.literalExpression "<any agent defined in Nix or in the registry>";
       description = "Deploy the agents declared below. On by default when any agent is defined.";
     };
 
@@ -582,8 +657,14 @@ in
       hostPath = mkOption {
         type = types.str;
         default = "${cfg.flakeDir}/agents";
-        defaultText = lib.literalExpression ''"''${services.agents.flakeDir}/agents"'';
+        defaultText = lib.literalExpression ''"''${services.agentfleet.flakeDir}/agents"'';
         description = "Where that same directory lives on disk, so agentctl can write to it.";
+      };
+      agents = mkOption {
+        type = types.attrsOf (types.submodule agentModule);
+        default = { };
+        internal = true;
+        description = "Agents parsed from registry.dir; set by this module.";
       };
     };
 
@@ -596,7 +677,7 @@ in
     rebuildCommand = mkOption {
       type = types.str;
       default = "nixos-rebuild {action} --flake ${cfg.flakeDir}";
-      defaultText = lib.literalExpression ''"nixos-rebuild {action} --flake ''${services.agents.flakeDir}"'';
+      defaultText = lib.literalExpression ''"nixos-rebuild {action} --flake ''${services.agentfleet.flakeDir}"'';
       description = ''
         Command agentctl runs to apply the registry. `{action}` is replaced by
         `switch` or `dry-activate`. Change it for colmena, deploy-rs, or a
@@ -650,19 +731,22 @@ in
   };
 
   config = mkMerge [
-    # The TOML registry feeds the same option Nix users set directly.
-    { services.agents.agents = tomlAgents; }
+    { services.agentfleet.registry.agents = tomlAgents; }
 
     (mkIf cfg.enable {
       assertions =
         (mapAttrsToList (name: a: {
           assertion = builtins.match nameRegex name != null;
           message = "agentfleet: agent name '${name}' must match ${nameRegex}";
-        }) cfg.agents)
+        }) allAgents)
+        ++ (mapAttrsToList (name: a: {
+          assertion = lib.stringLength "${cfg.userPrefix}${name}" <= maxUserLength;
+          message = "agentfleet: user name '${cfg.userPrefix}${name}' is longer than ${toString maxUserLength} characters; shorten the agent name or userPrefix";
+        }) allAgents)
         ++ (mapAttrsToList (name: a: {
           assertion = cfg.harnesses ? ${a.harness};
           message = "agentfleet: agent '${name}' uses unknown harness '${a.harness}' (available: ${concatStringsSep ", " (attrNames cfg.harnesses)})";
-        }) cfg.agents)
+        }) allAgents)
         ++ [
           {
             assertion = clashingNames == [ ];
@@ -678,32 +762,22 @@ in
           home = ag.home;
           createHome = false;
           shell = pkgs.bashInteractive;
+          # GECOS field: no colons or newlines allowed.
           description =
-            "agentfleet agent ${ag.name}" + optionalString (ag.description != "") ": ${ag.description}";
+            "agentfleet agent ${ag.name}"
+            + optionalString (ag.description != "") (
+              " - " + lib.replaceStrings [ ":" "\n" ] [ ";" " " ] ag.description
+            );
         }
       ) agents;
 
       users.groups = mapAttrs' (_: ag: nameValuePair ag.group { }) agents;
 
-      system.activationScripts.agentfleet = {
-        deps = [
-          "users"
-          "groups"
-        ];
-        text = ''
-          agentfleet_mkdirs() {
-            local u=$1 g=$2 cur=$3 rel=$4 part
-            local IFS=/
-            for part in $rel; do
-              cur="$cur/$part"
-              [ -d "$cur" ] || install -d -o "$u" -g "$g" -m 0750 "$cur"
-            done
-          }
-          install -d -m 0755 ${escapeShellArg cfg.homeBase}
-          install -d -m 0700 ${escapeShellArg cfg.stateDir}
-          ${concatStringsSep "\n" (mapAttrsToList (_: activationFor) agents)}
-        '';
-      };
+      systemd.tmpfiles.settings."50-agentfleet" = {
+        ${cfg.homeBase}.d.mode = "0755";
+        ${cfg.stateDir}.d.mode = "0700";
+      }
+      // lib.foldl' (acc: x: acc // x) { } (mapAttrsToList (_: tmpfilesFor) agents);
 
       systemd.services =
         (mapAttrs' (_: ag: nameValuePair ag.initServiceName (initService ag)) agents)

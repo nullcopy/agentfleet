@@ -8,6 +8,7 @@ systemd for the rest.
 """
 
 import argparse
+import getpass
 import json
 import os
 import pwd
@@ -19,7 +20,7 @@ import sys
 import tempfile
 
 STATE_PATH = os.environ.get("AGENTCTL_STATE", "/etc/agents/state.json")
-NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
+DEFAULT_NAME_REGEX = "[a-z][a-z0-9-]{0,30}"
 
 
 # ----------------------------------------------------------------------------
@@ -44,7 +45,7 @@ def load_state():
         with open(STATE_PATH) as f:
             return json.load(f)
     except FileNotFoundError:
-        die(f"{STATE_PATH} not found; is services.agents enabled on this host?")
+        die(f"{STATE_PATH} not found; is services.agentfleet enabled on this host?")
     except json.JSONDecodeError as e:
         die(f"{STATE_PATH} is not valid JSON: {e}")
 
@@ -78,22 +79,24 @@ def unit_state(unit):
     return r.stdout.strip() or "unknown"
 
 
+def git(repo, *args, check=True, capture=False):
+    # The flake checkout is usually owned by the admin, not root; without
+    # safe.directory git refuses to touch it ("dubious ownership").
+    cmd = ["git", "-c", f"safe.directory={repo}", "-C", repo, *args]
+    r = run(cmd, check=False, capture=capture)
+    if check and r.returncode != 0:
+        detail = (r.stderr or "").strip() if capture else ""
+        die(f"`{' '.join(cmd)}` failed" + (f": {detail}" if detail else ""))
+    return r
+
+
 def in_git(path):
-    r = run(
-        ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
-        check=False,
-        capture=True,
-    )
+    r = git(path, "rev-parse", "--is-inside-work-tree", check=False, capture=True)
     return r.returncode == 0 and r.stdout.strip() == "true"
 
 
 def git_tracked(repo, path):
-    r = run(
-        ["git", "-C", repo, "ls-files", "--error-unmatch", path],
-        check=False,
-        capture=True,
-    )
-    return r.returncode == 0
+    return git(repo, "ls-files", "--error-unmatch", path, check=False, capture=True).returncode == 0
 
 
 def confirm(prompt):
@@ -103,37 +106,91 @@ def confirm(prompt):
         return False
 
 
+def valid_name(state, name):
+    pattern = state.get("nameRegex", DEFAULT_NAME_REGEX)
+    if not re.fullmatch(pattern, name):
+        die(f"name '{name}' must match {pattern}")
+    user = f"{state['userPrefix']}{name}"
+    limit = state.get("maxUserLength", 32)
+    if len(user) > limit:
+        die(f"user name '{user}' would be longer than {limit} characters; pick a shorter name")
+
+
 # ----------------------------------------------------------------------------
-# secrets file (KEY=VALUE, root-owned 0400)
+# secrets file (KEY="VALUE", root-owned 0400; the systemd EnvironmentFile dialect)
 # ----------------------------------------------------------------------------
+_ENV_ESCAPE = '\\"$`'
+
+
 def read_env_file(path):
+    """Parse KEY=VALUE lines. Values may be bare, 'single' or "double" quoted;
+    inside double quotes a backslash escapes \\ " $ and ` and a quoted value
+    may span lines, exactly as systemd reads them."""
     out = {}
     try:
         with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-                    v = v[1:-1]
-                out[k.strip()] = v
+            text = f.read()
     except FileNotFoundError:
-        pass
+        return out
+    i, n = 0, len(text)
+    while i < n:
+        eol = text.find("\n", i)
+        if eol < 0:
+            eol = n
+        line = text[i:eol]
+        i = eol + 1
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, rest = stripped.split("=", 1)
+        key, rest = key.strip(), rest.lstrip()
+        if rest[:1] == '"':
+            val, j = [], 1
+            while True:
+                if j >= len(rest):  # quoted value continues on the next line
+                    if i >= n:
+                        break
+                    eol = text.find("\n", i)
+                    if eol < 0:
+                        eol = n
+                    rest, j = "\n" + text[i:eol], 0
+                    i = eol + 1
+                    continue
+                c = rest[j]
+                if c == "\\" and j + 1 < len(rest) and rest[j + 1] in _ENV_ESCAPE:
+                    val.append(rest[j + 1])
+                    j += 2
+                elif c == '"':
+                    break
+                else:
+                    val.append(c)
+                    j += 1
+            out[key] = "".join(val)
+        elif rest[:1] == "'":
+            end = rest.find("'", 1)
+            out[key] = rest[1:end] if end > 0 else rest[1:]
+        else:
+            out[key] = rest.rstrip()
     return out
 
 
+def env_quote(v):
+    return '"' + "".join("\\" + c if c in _ENV_ESCAPE else c for c in v) + '"'
+
+
 def write_env_file(path, values):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".secrets.")
-    with os.fdopen(fd, "w") as f:
-        f.write("# Managed by agentctl. KEY=VALUE, one per line.\n")
-        for k, v in sorted(values.items()):
-            f.write(f"{k}={shlex.quote(v) if any(c in v for c in ' #\"\\$') else v}\n")
-    os.chmod(tmp, 0o400)
-    os.chown(tmp, 0, 0)
-    os.replace(tmp, path)
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".secrets.")
+        with os.fdopen(fd, "w") as f:
+            f.write('# Managed by agentctl. KEY="VALUE", one per line.\n')
+            for k, v in sorted(values.items()):
+                f.write(f"{k}={env_quote(v)}\n")
+        os.chmod(tmp, 0o400)
+        os.chown(tmp, 0, 0)
+        os.replace(tmp, path)
+    except OSError as e:
+        die(f"cannot write {path}: {e.strerror}. If this file comes from sops-nix/agenix, change it there instead")
 
 
 def parse_kv(items, what):
@@ -161,8 +218,6 @@ def prompt_secrets(harness_def, provided, no_prompt):
             continue
         label = f"{name}" + (f" ({s['description']})" if s.get("description") else "")
         suffix = " [required]" if s.get("required") else " [enter to skip]"
-        import getpass
-
         while True:
             v = getpass.getpass(f"  {label}{suffix}: ")
             if v or not s.get("required"):
@@ -202,10 +257,15 @@ def toml_tables(d, prefix, out):
 
 
 def coerce(v):
+    """Turn a --set value into a TOML literal when it round-trips exactly
+    (so "0123" and "1_000" stay strings); use --set-str to force a string."""
     if v in ("true", "false"):
         return v == "true"
-    if re.match(r"^-?\d+$", v):
-        return int(v)
+    try:
+        if str(int(v)) == v:
+            return int(v)
+    except ValueError:
+        pass
     return v
 
 
@@ -224,7 +284,8 @@ def render_agent_toml(args):
         top["description"] = args.description
     if args.model:
         top["model"] = args.model
-    top["autostart"] = not args.no_autostart
+    if args.no_autostart:
+        top["autostart"] = False
     if args.memory_max:
         top["memory_max"] = args.memory_max
     if args.cpu_quota:
@@ -237,11 +298,11 @@ def render_agent_toml(args):
     if env:
         toml_tables(env, "environment", out)
     settings = {}
-    for item in args.set or []:
+    for item, literal in [(x, True) for x in args.set or []] + [(x, False) for x in args.set_str or []]:
         if "=" not in item:
             die(f"--set expects key=value, got '{item}'")
         k, v = item.split("=", 1)
-        set_nested(settings, k, coerce(v))
+        set_nested(settings, k, coerce(v) if literal else v)
     if settings:
         toml_tables(settings, "settings", out)
     return "\n".join(out) + "\n"
@@ -296,14 +357,13 @@ def cmd_harnesses(state, args):
 def cmd_add(state, args):
     need_root()
     name = args.name
-    if not NAME_RE.match(name):
-        die(f"name '{name}' must match {NAME_RE.pattern}")
+    valid_name(state, name)
     if name in state["agents"]:
         die(f"agent '{name}' already exists")
     if args.harness not in state["harnesses"]:
         die(f"unknown harness '{args.harness}' (see `agentctl harnesses`)")
     if not state["registry"]["enabled"]:
-        die("this host has no TOML registry (services.agents.registry.dir is unset); define agents in Nix instead")
+        die("this host has no TOML registry (services.agentfleet.registry.dir is unset); define agents in Nix instead")
     try:
         pwd.getpwnam(f"{state['userPrefix']}{name}")
         die(f"user {state['userPrefix']}{name} already exists on this host")
@@ -327,7 +387,7 @@ def cmd_add(state, args):
     flake = state["flakeDir"]
     if in_git(flake):
         # Flakes only see tracked files; an untracked registry entry is invisible.
-        run(["git", "-C", flake, "add", path])
+        git(flake, "add", path)
         print("git: staged (commit when you are happy with it)")
 
     if secrets:
@@ -369,7 +429,7 @@ def cmd_rm(state, args):
     flake = state["flakeDir"]
     if os.path.exists(path):
         if in_git(flake) and git_tracked(flake, path):
-            run(["git", "-C", flake, "rm", "-q", "-f", path])
+            git(flake, "rm", "-q", "-f", path)
         else:
             os.remove(path)
         print(f"removed {path}")
@@ -384,6 +444,11 @@ def cmd_rm(state, args):
             if p and os.path.isdir(p):
                 shutil.rmtree(p)
                 print(f"purged {p}")
+    elif os.path.isdir(a.get("home") or ""):
+        warn(
+            f"{a['home']} was kept. Its files still belong to the freed UID, which a "
+            f"future agent may receive; delete or chown it, or use --purge next time"
+        )
     print(f"agent '{args.name}' removed")
 
 
@@ -427,7 +492,7 @@ def cmd_logs(state, args):
     os.execvp("journalctl", cmd)
 
 
-def agent_environ(state, a):
+def agent_environ(a):
     env = {
         "HOME": a["home"],
         "USER": a["user"],
@@ -438,32 +503,51 @@ def agent_environ(state, a):
         "PATH": f"{a['path']}:/run/wrappers/bin:/run/current-system/sw/bin",
     }
     env.update(a.get("env", {}))
-    env.update(read_env_file(a["secretsFile"]))
     return env
 
 
-def exec_as_agent(state, a, argv):
+def exec_as_agent(name, a, argv):
+    """Run argv as the agent inside a transient service that carries the same
+    sandbox as the agent's units. Secrets reach it through EnvironmentFile,
+    read by systemd itself, so they never appear on a command line."""
     need_root()
     if not a.get("enabled", True):
         die("agent is disabled")
-    env = agent_environ(state, a)
-    os.chdir(a["home"])
-    cmd = ["runuser", "-u", a["user"], "--", "env", "-i"]
-    cmd += [f"{k}={v}" for k, v in env.items()]
-    cmd += argv
-    os.execvp("runuser", cmd)
+    cmd = [
+        "systemd-run",
+        "--quiet",
+        "--collect",
+        "--wait",
+        "--service-type=exec",
+        "--pty" if sys.stdin.isatty() else "--pipe",
+        "--send-sighup",
+        f"--unit=agent-{name}-run-{os.getpid()}",
+        f"--description=agentfleet: {' '.join(argv)}",
+        f"--uid={a['user']}",
+        f"--gid={a['group']}",
+        f"--working-directory={a['home']}",
+        "--expand-environment=no",
+        "-p",
+        f"EnvironmentFile={a['secretsFile']}",
+    ]
+    for prop in a.get("sandbox", []):
+        cmd += ["-p", prop]
+    for k, v in agent_environ(a).items():
+        cmd += [f"--setenv={k}={v}"]
+    cmd += ["--", *argv]
+    os.execvp("systemd-run", cmd)
 
 
 def cmd_shell(state, args):
     a = get_agent(state, args.name)
-    exec_as_agent(state, a, [a.get("shell", "/bin/sh"), "--login"])
+    exec_as_agent(args.name, a, [a.get("shell", "/bin/sh"), "--login"])
 
 
 def cmd_run(state, args):
     a = get_agent(state, args.name)
     if not args.cmd:
         die("usage: agentctl run <name> -- <command...>")
-    exec_as_agent(state, a, args.cmd)
+    exec_as_agent(args.name, a, args.cmd)
 
 
 def cmd_secrets(state, args):
@@ -481,7 +565,10 @@ def cmd_secrets(state, args):
         print(f"updated {path}")
     elif args.sub == "edit":
         editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
-        fd, tmp = tempfile.mkstemp(prefix="agentctl-secrets.", suffix=".env")
+        try:
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".edit.", suffix=".env")
+        except OSError as e:
+            die(f"cannot create a scratch file next to {path}: {e.strerror}")
         os.close(fd)
         try:
             if os.path.exists(path):
@@ -526,7 +613,8 @@ def build_parser():
     s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%")
     s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")
     s.add_argument("--env", action="append", metavar="K=V", help="non-secret environment variable (repeatable)")
-    s.add_argument("--set", action="append", metavar="KEY=VAL", help="harness setting, dotted keys allowed, e.g. gateway.port=18790 (repeatable)")
+    s.add_argument("--set", action="append", metavar="KEY=VAL", help="harness setting, dotted keys allowed, e.g. gateway.port=18790; integers and true/false become TOML literals (repeatable)")
+    s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
     s.add_argument("--secret", action="append", metavar="K=V", help="set a secret now instead of being prompted (repeatable)")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
     s.add_argument("--no-apply", action="store_true", help="write the registry entry but do not rebuild")
@@ -558,11 +646,11 @@ def build_parser():
     s.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_logs)
 
-    s = sub.add_parser("shell", help="open a login shell as the agent's user, with its secrets loaded")
+    s = sub.add_parser("shell", help="open a login shell as the agent's user, sandboxed, with its secrets loaded")
     s.add_argument("name")
     s.set_defaults(func=cmd_shell)
 
-    s = sub.add_parser("run", help="run one command as the agent's user: agentctl run <name> -- <cmd...>")
+    s = sub.add_parser("run", help="run one command as the agent's user, sandboxed: agentctl run <name> -- <cmd...>")
     s.add_argument("name")
     s.add_argument("cmd", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_run)
