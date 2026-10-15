@@ -1,8 +1,8 @@
 # agentfleet
 
 Run several AI agents on one NixOS host, each as its own locked-down Unix user,
-each with the harness of your choice (Hermes, OpenClaw, Claude Code, or any
-command), declared in Nix and driven day to day by a small CLI.
+each running a harness recipe (Hermes today; the recipe interface is open),
+declared in Nix and driven day to day by a small CLI.
 
 ```
 $ sudo agentctl add research --harness hermes --model anthropic/claude-sonnet-5.5
@@ -100,7 +100,7 @@ sudo nixos-rebuild switch --flake .
 ```sh
 agentctl harnesses      # recipes available on this host
 agentctl list           # "no agents defined"
-sudo agentctl add scout --harness claude-code
+sudo agentctl add scout --harness hermes
 ```
 
 For a complete walk-through, from creating a Hermes agent to chatting with it
@@ -108,9 +108,6 @@ in a Matrix room and removing it, see [docs/hermes-matrix.md](docs/hermes-matrix
 
 ### Optional
 
-- **Claude Code** is unfree in nixpkgs. To use that harness, add
-  `nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];`
-  to the host configuration.
 - **Agents in Nix instead of TOML.** Skip `registry.dir` and write
   `services.agentfleet.agents.<name> = { harness = "hermes"; ... };` directly.
   Both styles can be mixed.
@@ -146,8 +143,8 @@ your system configuration and is deployed, updated and rolled back with it.
 
 `shell` and `run` start a transient systemd service as the agent's user
 (`systemd-run --uid ... --pty`) carrying the same sandbox properties as the
-agent's own units, so an on-demand harness like Claude Code is as confined as
-a long-running one.
+agent's own units, so an on-demand harness is as confined as a long-running
+one.
 
 Everything agentctl knows comes from `/etc/agents/state.json`, which the module
 renders. It has no Nix logic of its own, so it works unchanged with any
@@ -160,7 +157,7 @@ registry location, rebuild command, or harness set.
 and a name defined in both is an evaluation error.
 
 ```toml
-harness = "hermes"                   # required: hermes | openclaw | claude-code | custom | yours
+harness = "hermes"                   # required: hermes, or a harness you defined
 description = "research assistant"
 model = "anthropic/claude-sonnet-5.5"
 enable = true                        # false: keep the file, deploy nothing
@@ -184,20 +181,20 @@ hand-written entries need it too.
 | name          | runs as            | config seeded at                 | notes |
 |---------------|--------------------|----------------------------------|-------|
 | `hermes`      | `hermes gateway`   | `~/.hermes/config.yaml`          | `settings` are Hermes config keys. Package comes from the hermes-agent flake input; first build compiles it. |
-| `openclaw`    | `openclaw gateway` | `~/.openclaw/openclaw.json`      | `OPENCLAW_GATEWAY_TOKEN` required. Each agent is its own gateway: give the second one `--set gateway.port=18790`. nixpkgs flags the package insecure; the recipe clears that flag. |
-| `claude-code` | on demand          | `~/.claude/settings.json`        | Unfree in nixpkgs: set `nixpkgs.config.allowUnfreePredicate`. Use `agentctl run name -- claude -p "..."`. |
-| `custom`      | `settings.exec`    | nothing                          | Any command; `settings.init` runs once on first start. |
 
-Seeded config files are written only if absent, because every one of these
-harnesses edits its own config at runtime. Changing `model` or `settings` after
+Only Hermes ships for now, so the experience around it can be polished before
+other harnesses (OpenClaw, Claude Code, ...) come back. Any command can still
+be run as an agent through a harness defined on your host; see below.
+
+Seeded config files are written only if absent, because Hermes edits its own
+config at runtime. Changing `model` or `settings` after
 the first start therefore does not rewrite the file; edit it as the agent
 (`agentctl shell`) or delete it and restart the init unit.
 
 All agents share one systemd sandbox definition (see `sandboxOf` in
 `modules/default.nix`). It forbids user namespaces, which breaks harnesses
-that wrap their own tool calls in bubblewrap, such as Claude Code's optional
-sandbox. Relax it per harness:
-`services.agentfleet.harnesses.claude-code.sandbox = _: { RestrictNamespaces = false; };`.
+that wrap their own tool calls in bubblewrap. Relax it per harness with the
+`sandbox` option, for example `_: { RestrictNamespaces = false; }`.
 
 ### Writing a harness
 
@@ -255,7 +252,7 @@ nix build .#checks.x86_64-linux.vm
 ```
 flake.nix                 nixosModules.{default,core}, packages.agentctl, checks
 modules/default.nix       the services.agentfleet module
-modules/harnesses/        hermes, openclaw, claude-code, custom
+modules/harnesses/        hermes
 pkgs/agentctl/            the CLI (python, stdlib only)
 checks/                   example host used by `nix flake check`, NixOS VM test
 docs/                     worked examples

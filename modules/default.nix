@@ -2,9 +2,9 @@
 #
 # Declares `services.agentfleet`: a set of AI agents, each running as its own
 # locked-down system user with its own home, systemd service and secrets
-# file. Harness-specific knowledge (how to run Hermes,
-# OpenClaw, Claude Code, ...) lives in modules/harnesses/*.nix, which register
-# themselves under `services.agentfleet.harnesses.<name>`.
+# file. Harness-specific knowledge (how to run Hermes, ...) lives in
+# modules/harnesses/*.nix, which register themselves under
+# `services.agentfleet.harnesses.<name>`.
 #
 # Agents come from two places and are merged:
 #   1. `services.agentfleet.agents.<name> = { ... }`   — plain Nix

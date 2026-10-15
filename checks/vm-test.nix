@@ -1,4 +1,4 @@
-# NixOS VM test. Uses only the `custom` harness so nothing heavy is built.
+# NixOS VM test. Uses an inline test harness so Hermes is not built.
 # Run with: nix build .#checks.x86_64-linux.vm   (needs KVM)
 { pkgs, self }:
 
@@ -15,6 +15,12 @@ pkgs.testers.runNixOSTest {
         rebuildCommand = "echo would-run nixos-rebuild {action}";
         registry.dir = ./vm-registry;
         registry.hostPath = "/root/flake/agents";
+
+        harnesses.custom = {
+          description = "test harness";
+          exec = ag: ag.settings.exec or null;
+          init = ag: ag.settings.init or "";
+        };
 
         agents.sleeper = {
           harness = "custom";

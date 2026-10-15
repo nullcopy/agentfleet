@@ -1,5 +1,5 @@
-# Exercises every built-in harness and both agent sources. Used by
-# `nix flake check` (evaluation only) and handy as a reference.
+# Exercises the built-in harness, an inline test harness and both agent
+# sources. Used by `nix flake check` (evaluation only) and handy as a reference.
 { pkgs, lib, ... }:
 
 {
@@ -9,16 +9,16 @@
     device = "none";
     fsType = "tmpfs";
   };
-  nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 
   services.agentfleet = {
     registry.dir = ./example-registry;
     flakeDir = "/etc/nixos";
 
-    agents.reviewer = {
-      harness = "claude-code";
-      model = "claude-opus-5-5";
-      description = "on-demand code reviewer";
+    # A minimal harness defined on the host itself: any command as a service.
+    harnesses.custom = {
+      description = "run settings.exec as the agent";
+      exec = ag: ag.settings.exec or null;
+      init = ag: ag.settings.init or "";
     };
 
     agents.echo = {
@@ -27,9 +27,10 @@
       memoryMax = "256M";
     };
 
-    agents.fenced = {
-      harness = "openclaw";
-      settings.gateway.port = 18790;
+    agents.scribe = {
+      harness = "hermes";
+      model = "anthropic/claude-sonnet-5.5";
+      description = "second Hermes agent";
     };
 
     agents.parked = {
