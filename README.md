@@ -23,7 +23,6 @@ What you get per agent:
 - a hardened systemd service (or none, for on-demand harnesses like Claude Code)
 - a root-owned secrets file at `/var/lib/agents/<name>/secrets.env`, injected into the
   service and into `agentctl shell`/`run`, never readable by the agent's user directly
-- optional outbound-network policy: open, loopback only, or an IP/CIDR allowlist
 - optional `MemoryMax` / `CPUQuota`
 
 Removing an agent from the registry and rebuilding removes the user and units.
@@ -52,7 +51,6 @@ services.agents = {
   # or, without a registry, declare agents inline:
   agents.reviewer = { harness = "claude-code"; model = "claude-opus-5-5"; };
 };
-networking.firewall.enable = true;  # needed only for egress policies
 nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 ```
 
@@ -83,8 +81,7 @@ agentctl secrets set|edit|list <name>
 
 `agentctl add` options worth knowing: `--set key=value` writes harness settings
 (dotted keys allowed, e.g. `--set gateway.port=18790`), `--env K=V` adds
-non-secret environment, `--package` adds nixpkgs packages to PATH,
-`--allow-host IP|CIDR` or `--no-network` set the egress policy, and
+non-secret environment, `--package` adds nixpkgs packages to PATH, and
 `--no-apply` writes the registry entry without rebuilding.
 
 Everything agentctl knows comes from `/etc/agents/state.json`, which the module
@@ -106,8 +103,6 @@ autostart = true                     # start at boot (service harnesses only)
 packages = ["python3", "nodejs"]     # nixpkgs attribute paths
 memory_max = "4G"
 cpu_quota = "200%"
-egress = "allowlist"                 # open | none | allowlist
-egress_allow = ["100.64.0.0/10"]     # IPs/CIDRs; hostnames are not supported
 secrets_file = "/run/secrets/research.env"   # e.g. sops-nix; default is under /var/lib/agents
 
 [environment]
@@ -161,15 +156,6 @@ The default secrets file is created empty, root-owned, mode 0400, and loaded via
 running service. To manage secrets declaratively, point `secretsFile` at a
 sops-nix or agenix path; agentctl then edits that path, so leave it read-only
 and use your secrets tool instead.
-
-## Egress
-
-`egress = "none"` or `"allowlist"` installs owner-UID rules for the agent's user:
-nftables when `networking.nftables.enable`, iptables via the NixOS firewall
-otherwise. Loopback is always allowed, so a local Ollama or proxy keeps
-working. Rules match IPs, not hostnames; allow your resolver and the API
-subnet, or put an egress proxy on loopback. The rules apply to everything the
-user runs, including `agentctl shell`.
 
 ## Several hosts
 

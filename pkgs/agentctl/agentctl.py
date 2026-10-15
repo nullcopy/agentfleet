@@ -231,11 +231,6 @@ def render_agent_toml(args):
         top["cpu_quota"] = args.cpu_quota
     if args.package:
         top["packages"] = args.package
-    if args.allow_host:
-        top["egress"] = "allowlist"
-        top["egress_allow"] = args.allow_host
-    elif args.no_network:
-        top["egress"] = "none"
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then `agentctl apply`."]
     toml_tables(top, "", out)
     env = parse_kv(args.env, "--env")
@@ -532,9 +527,6 @@ def build_parser():
     s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")
     s.add_argument("--env", action="append", metavar="K=V", help="non-secret environment variable (repeatable)")
     s.add_argument("--set", action="append", metavar="KEY=VAL", help="harness setting, dotted keys allowed, e.g. gateway.port=18790 (repeatable)")
-    g = s.add_mutually_exclusive_group()
-    g.add_argument("--allow-host", action="append", metavar="IP|CIDR", help="restrict egress to these addresses (repeatable; loopback always allowed)")
-    g.add_argument("--no-network", action="store_true", help="block all egress except loopback")
     s.add_argument("--secret", action="append", metavar="K=V", help="set a secret now instead of being prompted (repeatable)")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
     s.add_argument("--no-apply", action="store_true", help="write the registry entry but do not rebuild")

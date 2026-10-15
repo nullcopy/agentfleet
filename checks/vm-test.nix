@@ -9,8 +9,6 @@ pkgs.testers.runNixOSTest {
     { pkgs, ... }:
     {
       imports = [ self.nixosModules.core ];
-      networking.nftables.enable = true;
-      networking.firewall.enable = true;
 
       services.agents = {
         flakeDir = "/root/flake";
@@ -22,7 +20,6 @@ pkgs.testers.runNixOSTest {
           harness = "custom";
           settings.exec = "${pkgs.coreutils}/bin/sleep infinity";
           settings.init = "echo init-ran > \"$HOME/init-marker\"";
-          egress = "none";
           environment.GREETING = "hello";
         };
 
@@ -59,10 +56,6 @@ pkgs.testers.runNixOSTest {
     assert state["agents"]["tool"]["service"] is None
     assert state["agents"]["fromtoml"]["source"] == "toml"
     assert state["agents"]["sleeper"]["env"]["GREETING"] == "hello"
-
-    # egress rules landed in nftables
-    rules = machine.succeed("nft list table inet agentfleet-egress")
-    assert 'skuid "agent-sleeper"' in rules and "drop" in rules
 
     # agentctl: list / run / secrets / add / rm
     out = machine.succeed("agentctl list")

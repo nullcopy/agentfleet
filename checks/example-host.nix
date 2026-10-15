@@ -9,7 +9,6 @@
     device = "none";
     fsType = "tmpfs";
   };
-  networking.firewall.enable = true;
   nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 
   services.agents = {
@@ -25,17 +24,11 @@
     agents.echo = {
       harness = "custom";
       settings.exec = "${pkgs.coreutils}/bin/sleep infinity";
-      egress = "none";
       memoryMax = "256M";
     };
 
     agents.fenced = {
       harness = "openclaw";
-      egress = "allowlist";
-      egressAllow = [
-        "100.64.0.0/10"
-        "fd7a:115c:a1e0::/48"
-      ];
       settings.gateway.port = 18790;
     };
 

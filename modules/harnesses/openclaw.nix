@@ -3,7 +3,7 @@
 # nixpkgs marks openclaw as insecure (prompt-injection warning). Rather than
 # requiring nixpkgs.config.permittedInsecurePackages on every host, the default
 # package here clears that flag; the risk is unchanged and is exactly why each
-# agent gets its own user and optional egress policy.
+# agent gets its own user.
 #
 # Every OpenClaw agent runs its own gateway. The default port is 18789, so a
 # second OpenClaw agent on the same host needs

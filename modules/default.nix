@@ -1,8 +1,8 @@
 # agentfleet — core NixOS module.
 #
 # Declares `services.agents`: a set of AI agents, each running as its own
-# locked-down system user with its own home, systemd service, secrets file and
-# optional egress policy. Harness-specific knowledge (how to run Hermes,
+# locked-down system user with its own home, systemd service and secrets
+# file. Harness-specific knowledge (how to run Hermes,
 # OpenClaw, Claude Code, ...) lives in modules/harnesses/*.nix, which register
 # themselves under `services.agents.harnesses.<name>`.
 #
@@ -38,14 +38,12 @@ let
     attrNames
     attrValues
     concatStringsSep
-    concatMapStringsSep
     optional
     optionals
     optionalString
     optionalAttrs
     hasSuffix
     hasPrefix
-    hasInfix
     removeSuffix
     escapeShellArg
     splitString
@@ -64,8 +62,6 @@ let
     packages = "packages";
     memory_max = "memoryMax";
     cpu_quota = "cpuQuota";
-    egress = "egress";
-    egress_allow = "egressAllow";
     environment = "environment";
     settings = "settings";
     description = "description";
@@ -241,28 +237,6 @@ let
           example = "200%";
           description = "systemd CPUQuota for the service.";
         };
-        egress = mkOption {
-          type = types.enum [
-            "open"
-            "none"
-            "allowlist"
-          ];
-          default = "open";
-          description = ''
-            Outbound network policy for everything this agent's user runs.
-            `none` blocks all but loopback; `allowlist` additionally permits
-            the IPs/CIDRs in egressAllow. Hostnames are not supported.
-          '';
-        };
-        egressAllow = mkOption {
-          type = types.listOf types.str;
-          default = [ ];
-          example = [
-            "100.64.0.0/10"
-            "192.168.1.10"
-          ];
-          description = "IPv4/IPv6 addresses or CIDRs allowed when egress = allowlist.";
-        };
         environment = mkOption {
           type = types.attrsOf types.str;
           default = { };
@@ -362,7 +336,6 @@ let
   enabledAgents = filterAttrs (_: a: a.enable && cfg.harnesses ? ${a.harness}) cfg.agents;
   agents = mapAttrs resolve enabledAgents;
   serviceAgents = filterAttrs (_: ag: ag.exec != null) agents;
-  restrictedAgents = filterAttrs (_: ag: ag.raw.egress != "open") agents;
 
   profileOf =
     ag:
@@ -520,54 +493,6 @@ let
     ];
   };
 
-  ## ----- egress policy -------------------------------------------------------
-  v4 = builtins.filter (x: !hasInfix ":" x);
-  v6 = builtins.filter (hasInfix ":");
-
-  iptablesRules =
-    ag:
-    let
-      u = ag.user;
-      allow = ag.raw.egressAllow;
-      fam = cmd: addrs: ''
-        ${cmd} -A OUTPUT -o lo -m owner --uid-owner ${u} -j ACCEPT
-        ${concatMapStringsSep "\n" (
-          a: "${cmd} -A OUTPUT -d ${a} -m owner --uid-owner ${u} -j ACCEPT"
-        ) addrs}
-        ${cmd} -A OUTPUT -m owner --uid-owner ${u} -j DROP
-      '';
-    in
-    fam "iptables" (v4 allow) + fam "ip6tables" (v6 allow);
-
-  iptablesStop =
-    ag:
-    let
-      u = ag.user;
-      allow = ag.raw.egressAllow;
-      fam = cmd: addrs: ''
-        ${cmd} -D OUTPUT -o lo -m owner --uid-owner ${u} -j ACCEPT 2>/dev/null || true
-        ${concatMapStringsSep "\n" (
-          a: "${cmd} -D OUTPUT -d ${a} -m owner --uid-owner ${u} -j ACCEPT 2>/dev/null || true"
-        ) addrs}
-        ${cmd} -D OUTPUT -m owner --uid-owner ${u} -j DROP 2>/dev/null || true
-      '';
-    in
-    fam "iptables" (v4 allow) + fam "ip6tables" (v6 allow);
-
-  nftRules =
-    ag:
-    let
-      u = ag.user;
-      allow = ag.raw.egressAllow;
-      set = addrs: "{ ${concatStringsSep ", " addrs} }";
-    in
-    ''
-      meta skuid "${u}" oifname "lo" accept
-      ${optionalString (v4 allow != [ ]) ''meta skuid "${u}" ip daddr ${set (v4 allow)} accept''}
-      ${optionalString (v6 allow != [ ]) ''meta skuid "${u}" ip6 daddr ${set (v6 allow)} accept''}
-      meta skuid "${u}" drop
-    '';
-
   ## ----- state for agentctl --------------------------------------------------
   stateJson = builtins.toJSON {
     version = 1;
@@ -600,7 +525,6 @@ let
           stateDir
           ;
         source = ag.raw.source;
-        egress = ag.raw.egress;
         service = if ag.exec != null then "${ag.serviceName}.service" else null;
         initService = "${ag.initServiceName}.service";
         env = ag.envVars;
@@ -739,19 +663,10 @@ in
           assertion = cfg.harnesses ? ${a.harness};
           message = "agentfleet: agent '${name}' uses unknown harness '${a.harness}' (available: ${concatStringsSep ", " (attrNames cfg.harnesses)})";
         }) cfg.agents)
-        ++ (mapAttrsToList (name: a: {
-          assertion = a.egress != "allowlist" || a.egressAllow != [ ];
-          message = "agentfleet: agent '${name}' has egress = allowlist but an empty egressAllow";
-        }) cfg.agents)
         ++ [
           {
             assertion = clashingNames == [ ];
             message = "agentfleet: agent(s) ${concatStringsSep ", " clashingNames} are defined both in Nix and in the TOML registry; keep one";
-          }
-          {
-            assertion =
-              restrictedAgents == { } || config.networking.nftables.enable || config.networking.firewall.enable;
-            message = "agentfleet: egress policies need networking.firewall.enable or networking.nftables.enable";
           }
         ];
 
@@ -809,24 +724,6 @@ in
       ) agents;
 
       environment.systemPackages = optional cfg.installCli cfg.cliPackage;
-
-      # Egress: nftables table when the host uses nftables, iptables otherwise.
-      networking.nftables.tables = mkIf (restrictedAgents != { } && config.networking.nftables.enable) {
-        agentfleet-egress = {
-          family = "inet";
-          content = ''
-            chain output {
-              type filter hook output priority filter; policy accept;
-              ${concatStringsSep "\n" (mapAttrsToList (_: nftRules) restrictedAgents)}
-            }
-          '';
-        };
-      };
-
-      networking.firewall = mkIf (restrictedAgents != { } && !config.networking.nftables.enable) {
-        extraCommands = concatStringsSep "\n" (mapAttrsToList (_: iptablesRules) restrictedAgents);
-        extraStopCommands = concatStringsSep "\n" (mapAttrsToList (_: iptablesStop) restrictedAgents);
-      };
     })
   ];
 }
