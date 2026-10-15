@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""agentctl - manage declarative AI agents on this host (agentfleet).
+"""agentctl - manage the Hermes agents on this host (agentfleet).
 
 The NixOS module renders everything this tool needs to /etc/agents/state.json.
 agentctl itself knows nothing about Nix: it writes one TOML file per agent into
-the registry directory, runs the host's rebuild command, and shells out to
-systemd for the rest.
+the registry directory, runs nixos-rebuild, and shells out to systemd and to
+agentfleet-matrix for the rest.
 """
 
 import argparse
@@ -205,26 +205,19 @@ def parse_kv(items, what):
     return out
 
 
-def prompt_secrets(harness_def, provided, no_prompt):
-    """Return the secrets to write for a new agent."""
+def prompt_secrets(state, provided, no_prompt):
+    """Return the secrets to write for a new agent: one provider key is enough."""
     values = dict(provided)
-    for s in harness_def.get("secrets", []):
+    for s in state.get("secrets", []):
         name = s["name"]
-        if name in values:
-            continue
-        if no_prompt or not sys.stdin.isatty():
-            if s.get("required"):
-                die(f"secret {name} is required by this harness; pass --secret {name}=...")
+        if name in values or no_prompt or not sys.stdin.isatty():
             continue
         label = f"{name}" + (f" ({s['description']})" if s.get("description") else "")
-        suffix = " [required]" if s.get("required") else " [enter to skip]"
-        while True:
-            v = getpass.getpass(f"  {label}{suffix}: ")
-            if v or not s.get("required"):
-                break
-            print("  this secret is required")
+        v = getpass.getpass(f"  {label} [enter to skip]: ")
         if v:
             values[name] = v
+    if not any(k in values for k in (s["name"] for s in state.get("secrets", []))):
+        warn("no model provider key given; the agent will start but cannot answer until you run `agentctl secrets set`")
     return values
 
 
@@ -279,13 +272,11 @@ def set_nested(d, dotted, value):
 
 
 def render_agent_toml(args):
-    top = {"harness": args.harness}
+    top = {}
     if args.description:
         top["description"] = args.description
     if args.model:
         top["model"] = args.model
-    if args.no_autostart:
-        top["autostart"] = False
     if args.memory_max:
         top["memory_max"] = args.memory_max
     if args.cpu_quota:
@@ -294,8 +285,6 @@ def render_agent_toml(args):
         top["packages"] = args.package
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
-    if args.no_matrix:
-        toml_tables({"enable": False}, "matrix", out)
     env = parse_kv(args.env, "--env")
     if env:
         toml_tables(env, "environment", out)
@@ -332,32 +321,17 @@ def cmd_list(state, args):
     rows = []
     for name in sorted(state["agents"]):
         a = state["agents"][name]
-        if not a.get("enabled", True):
-            st = "disabled"
-        elif a.get("service"):
-            st = unit_state(a["service"])
-        else:
-            st = "on-demand"
-        mxid = (a.get("matrix") or {}).get("userId") or "-"
-        rows.append((name, a["harness"], a.get("source", "nix"), st, a.get("user", ""), mxid, a.get("description", "")))
+        st = unit_state(a["service"]) if a.get("enabled", True) else "disabled"
+        rows.append((name, st, a.get("userId", ""), a.get("model") or "", a.get("description", "")))
     if not rows:
         print("no agents defined")
         return
-    hdr = ("NAME", "HARNESS", "SOURCE", "STATE", "USER", "MATRIX", "DESCRIPTION")
-    widths = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(6)]
+    hdr = ("NAME", "STATE", "MATRIX", "MODEL", "DESCRIPTION")
+    widths = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(4)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths) + "  {}"
     print(fmt.format(*hdr))
     for r in rows:
         print(fmt.format(*r))
-
-
-def cmd_harnesses(state, args):
-    for name in sorted(state["harnesses"]):
-        h = state["harnesses"][name]
-        print(f"{name}: {h.get('description', '')}")
-        for s in h.get("secrets", []):
-            flag = "required" if s.get("required") else "optional"
-            print(f"    {s['name']:<28} {flag:<9} {s.get('description', '')}")
 
 
 def cmd_add(state, args):
@@ -366,8 +340,6 @@ def cmd_add(state, args):
     valid_name(state, name)
     if name in state["agents"]:
         die(f"agent '{name}' already exists")
-    if args.harness not in state["harnesses"]:
-        die(f"unknown harness '{args.harness}' (see `agentctl harnesses`)")
     if not state["registry"]["enabled"]:
         die("this host has no TOML registry (services.agentfleet.registry.dir is unset); define agents in Nix instead")
     try:
@@ -381,9 +353,7 @@ def cmd_add(state, args):
     if os.path.exists(path):
         die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
 
-    secrets = prompt_secrets(
-        state["harnesses"][args.harness], parse_kv(args.secret, "--secret"), args.no_prompt
-    )
+    secrets = prompt_secrets(state, parse_kv(args.secret, "--secret"), args.no_prompt)
 
     os.makedirs(reg, exist_ok=True)
     with open(path, "w") as f:
@@ -405,7 +375,8 @@ def cmd_add(state, args):
         print(f"skipping rebuild (--no-rebuild); run `{rebuild_cmd(state)}` when ready")
         return
     rebuild(state)
-    print(f"agent '{name}' is up. Next: agentctl status {name} | agentctl shell {name}")
+    print(f"agent '{name}' is up and will introduce itself to {state['matrix']['operator']} on Matrix.")
+    print(f"Next: agentctl status {name} | agentctl logs {name} -f")
 
 
 def cmd_rm(state, args):
@@ -450,10 +421,9 @@ def cmd_rm(state, args):
             if p and os.path.isdir(p):
                 shutil.rmtree(p)
                 print(f"purged {p}")
-        ctl = (state.get("matrix") or {}).get("ctl")
-        if ctl and (a.get("matrix") or {}).get("enable") and not args.no_rebuild:
+        if not args.no_rebuild:
             # The rebuild above locked the account; purge deactivates it for good.
-            run([ctl, "deactivate", args.name], check=False)
+            run([state["matrix"]["ctl"], "deactivate", args.name], check=False)
     elif os.path.isdir(a.get("home") or ""):
         warn(
             f"{a['home']} was kept. Its files still belong to the freed UID, which a "
@@ -465,7 +435,7 @@ def cmd_rm(state, args):
 def service_or_die(a, name):
     unit = a.get("service")
     if not unit:
-        die(f"agent '{name}' uses an on-demand harness ({a['harness']}); there is no service. Use `agentctl run {name} -- <cmd>`")
+        die(f"agent '{name}' is disabled; set enable = true in its registry file and rebuild")
     return unit
 
 
@@ -481,7 +451,7 @@ def cmd_status(state, args):
     a = get_agent(state, args.name)
     units = [u for u in (a.get("service"), a.get("initService")) if u]
     if not units:
-        print(f"{args.name}: on-demand harness, no units")
+        print(f"{args.name}: disabled, no units")
         return
     systemctl("status", "--no-pager", "--lines=0", *units, check=False)
 
@@ -490,76 +460,16 @@ def cmd_logs(state, args):
     a = get_agent(state, args.name)
     units = [u for u in (a.get("service"), a.get("initService")) if u]
     if not units:
-        die(f"agent '{args.name}' has no service; nothing is logged under a unit")
+        die(f"agent '{args.name}' is disabled; nothing is logged under a unit")
     cmd = ["journalctl", "--no-pager" if not args.follow else "-f", "-n", str(args.lines)]
     for u in units:
         cmd += ["-u", u]
     os.execvp("journalctl", cmd)
 
 
-def agent_environ(a):
-    env = {
-        "HOME": a["home"],
-        "USER": a["user"],
-        "LOGNAME": a["user"],
-        "SHELL": a.get("shell", "/bin/sh"),
-        "TERM": os.environ.get("TERM", "xterm-256color"),
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "PATH": f"{a['path']}:/run/wrappers/bin:/run/current-system/sw/bin",
-    }
-    env.update(a.get("env", {}))
-    return env
-
-
-def exec_as_agent(name, a, argv):
-    """Run argv as the agent inside a transient service that carries the same
-    sandbox as the agent's units. Secrets reach it through EnvironmentFile,
-    read by systemd itself, so they never appear on a command line."""
-    need_root()
-    if not a.get("enabled", True):
-        die("agent is disabled")
-    cmd = [
-        "systemd-run",
-        "--quiet",
-        "--collect",
-        "--wait",
-        "--service-type=exec",
-        "--pty" if sys.stdin.isatty() else "--pipe",
-        "--send-sighup",
-        f"--unit=agent-{name}-run-{os.getpid()}",
-        f"--description=agentfleet: {' '.join(argv)}",
-        f"--uid={a['user']}",
-        f"--gid={a['group']}",
-        f"--working-directory={a['home']}",
-        "--expand-environment=no",
-    ]
-    for f in a.get("envFiles") or [a["secretsFile"]]:
-        cmd += ["-p", f"EnvironmentFile={f}"]
-    for prop in a.get("sandbox", []):
-        cmd += ["-p", prop]
-    for k, v in agent_environ(a).items():
-        cmd += [f"--setenv={k}={v}"]
-    cmd += ["--", *argv]
-    os.execvp("systemd-run", cmd)
-
-
-def cmd_shell(state, args):
-    a = get_agent(state, args.name)
-    exec_as_agent(args.name, a, [a.get("shell", "/bin/sh"), "--login"])
-
-
-def cmd_run(state, args):
-    a = get_agent(state, args.name)
-    if not args.cmd:
-        die("usage: agentctl run <name> -- <command...>")
-    exec_as_agent(args.name, a, args.cmd)
-
-
 def cmd_matrix(state, args):
     need_root()
-    ctl = (state.get("matrix") or {}).get("ctl")
-    if not ctl:
-        die("the built-in Matrix server is off on this host (services.agentfleet.matrix.enable)")
+    ctl = state["matrix"]["ctl"]
     os.execvp(ctl, [ctl, *args.args])
 
 
@@ -604,39 +514,33 @@ def cmd_secrets(state, args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="agentctl",
-        description="Manage declarative AI agents on this host. Each agent is its own Unix user.",
+        description="Manage the Hermes agents on this host. Each agent is its own Unix user with its own Matrix account.",
         epilog="State comes from %s (override with $AGENTCTL_STATE)." % STATE_PATH,
     )
     sub = p.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
-    s = sub.add_parser("list", help="show all agents and their service state")
+    s = sub.add_parser("list", help="show all agents, their state and Matrix id")
     s.set_defaults(func=cmd_list)
 
-    s = sub.add_parser("harnesses", help="list available harness recipes and their secrets")
-    s.set_defaults(func=cmd_harnesses)
-
-    s = sub.add_parser("add", help="register a new agent and rebuild", description="Register a new agent: write <registry>/<name>.toml, store its secrets, rebuild the host.")
+    s = sub.add_parser("add", help="create an agent and rebuild", description="Create an agent: write <registry>/<name>.toml, store its provider key, rebuild the host. It then introduces itself to you on Matrix.")
     s.add_argument("name")
-    s.add_argument("--harness", required=True, help="recipe name (see `agentctl harnesses`)")
-    s.add_argument("--model", help="default model id for the harness")
-    s.add_argument("--description", help="free text shown in `agentctl list`")
-    s.add_argument("--no-autostart", action="store_true", help="do not start the service at boot")
+    s.add_argument("--model", help="Hermes model id, e.g. anthropic/claude-sonnet-5.5")
+    s.add_argument("--description", help="free text shown in `agentctl list` and in the introduction")
     s.add_argument("--memory-max", metavar="SIZE", help="systemd MemoryMax, e.g. 4G")
     s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%")
     s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")
     s.add_argument("--env", action="append", metavar="K=V", help="non-secret environment variable (repeatable)")
-    s.add_argument("--set", action="append", metavar="KEY=VAL", help="harness setting, dotted keys allowed, e.g. gateway.port=18790; integers and true/false become TOML literals (repeatable)")
+    s.add_argument("--set", action="append", metavar="KEY=VAL", help="Hermes config.yaml key, dotted keys allowed; integers and true/false become TOML literals (repeatable)")
     s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
-    s.add_argument("--secret", action="append", metavar="K=V", help="set a secret now instead of being prompted (repeatable)")
-    s.add_argument("--no-matrix", action="store_true", help="do not give the agent an account on the fleet's Matrix server")
+    s.add_argument("--secret", action="append", metavar="K=V", help="set a provider key now instead of being prompted (repeatable)")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
     s.add_argument("--no-rebuild", action="store_true", help="write the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_add)
 
-    s = sub.add_parser("rm", help="unregister an agent and rebuild")
+    s = sub.add_parser("rm", help="remove an agent and rebuild; its Matrix account is locked")
     s.add_argument("name")
-    s.add_argument("--purge", action="store_true", help="also delete the home directory, state and secrets")
+    s.add_argument("--purge", action="store_true", help="also delete home, state and secrets, and deactivate the Matrix account for good")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
     s.add_argument("--no-rebuild", action="store_true", help="remove the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_rm)
@@ -656,23 +560,14 @@ def build_parser():
     s.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_logs)
 
-    s = sub.add_parser("shell", help="open a login shell as the agent's user, sandboxed, with its secrets loaded")
-    s.add_argument("name")
-    s.set_defaults(func=cmd_shell)
-
-    s = sub.add_parser("run", help="run one command as the agent's user, sandboxed: agentctl run <name> -- <cmd...>")
-    s.add_argument("name")
-    s.add_argument("cmd", nargs=argparse.REMAINDER)
-    s.set_defaults(func=cmd_run)
-
-    s = sub.add_parser("matrix", help="fleet Matrix server: status | introduce <name> | rotate-token <name> | deactivate <name> | register-user <localpart>")
+    s = sub.add_parser("matrix", help="fleet Matrix server: status | introduce <name> | rotate-token <name> | deactivate <name>")
     s.add_argument("args", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_matrix)
 
-    s = sub.add_parser("secrets", help="manage the agent's secrets file")
+    s = sub.add_parser("secrets", help="manage the agent's provider keys")
     ss = s.add_subparsers(dest="sub", metavar="<set|edit|list>")
     ss.required = True
-    x = ss.add_parser("set", help="create or update KEY=VALUE pairs; restarts a running service")
+    x = ss.add_parser("set", help="create or update KEY=VALUE pairs; restarts a running agent")
     x.add_argument("name")
     x.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
     x = ss.add_parser("edit", help="open the secrets file in $EDITOR")
@@ -685,8 +580,6 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    if args.command == "run" and args.cmd and args.cmd[0] == "--":
-        args.cmd = args.cmd[1:]
     if args.command == "matrix" and not args.args:
         args.args = ["status"]
     state = load_state()

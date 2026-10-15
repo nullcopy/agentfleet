@@ -1,54 +1,46 @@
 # agentfleet
 
-Run a fleet of AI agents on one NixOS host. Each agent is its own locked-down
-Unix user running [Hermes](https://github.com/NousResearch/hermes-agent), with
-an account on the fleet's own Matrix server, and it introduces itself to you
-on Matrix when it comes up. Agents are declared in Nix or as one TOML file
-each, and `agentctl` handles the day to day.
+A fleet of [Hermes](https://github.com/NousResearch/hermes-agent) agents on
+one NixOS host, each its own locked-down Unix user, each with an account on
+the fleet's own Matrix server. You talk to them from your existing Matrix
+account; a new agent opens a DM with you as soon as it is up.
 
 ```
-$ sudo agentctl add scout --harness hermes --model anthropic/claude-sonnet-5.5
+$ sudo agentctl add scout --model anthropic/claude-sonnet-5.5 --description "research assistant"
   ANTHROPIC_API_KEY (Anthropic API key) [enter to skip]: ********
   ...
 wrote /etc/nixos/agents/scout.toml
 ==> nixos-rebuild switch --flake /etc/nixos
-agent 'scout' is up. Next: agentctl status scout | agentctl shell scout
+agent 'scout' is up and will introduce itself to @alice:example.com on Matrix.
 ```
 
-A minute later `@scout:matrix.example.org` opens a DM with you:
-
-> Hello! I'm **scout**, a hermes agent running on `myhost`
-> (anthropic/claude-sonnet-5.5). This room is our direct line: message me
-> here any time.
+> **scout**: Hello! I'm scout, a Hermes agent running on `myhost`
+> (anthropic/claude-sonnet-5.5). Research assistant. This room is our direct
+> line: message me here any time.
 
 ```
 $ sudo agentctl rm scout --purge
 ```
 
-## Documentation
+What agentfleet is, in five points:
 
-- [Install](docs/install.md): add agentfleet to a NixOS host you already run,
-  including the Matrix server and the reverse proxy in front of it.
-- [End-to-end example](docs/e2e-example.md): create a Hermes agent, receive
-  its introduction, chat with it, remove it.
-- [Reference](docs/reference.md): registry format, agent and harness options,
-  secrets, the sandbox, how the Matrix server works, checks.
+1. It runs on a NixOS host you already have.
+2. It gives that host a Matrix server, for which you set up a domain.
+3. It gives you `agentctl` to create, manage and destroy agents on that server.
+4. Every agent is a Hermes agent connected to that Matrix server.
+5. You are expected to have your own Matrix id on another, pre-existing server.
 
-## agentctl
+- [Install](docs/install.md): flake input, domain, DNS, reverse proxy, first rebuild.
+- [End-to-end example](docs/e2e-example.md): create an agent, receive its introduction, chat, remove it.
+- [Reference](docs/reference.md): registry format, what an agent gets, secrets, the sandbox, how the Matrix side works.
 
 ```
-agentctl list                      agents, harness, state, Matrix id
-agentctl harnesses                 recipes and the secrets they understand
-agentctl add <name> --harness H    register + store secrets + rebuild
-agentctl rm <name> [--purge]       unregister + rebuild [+ delete home, state, account]
+agentctl list                      agents, state, Matrix id, model
+agentctl add <name> [--model M]    create an agent: registry file, provider key, rebuild
+agentctl rm <name> [--purge]       remove it; --purge also deletes home, state, secrets and the Matrix account
 agentctl start|stop|restart <name>
 agentctl status [name]
 agentctl logs <name> [-f] [-n N]
-agentctl shell <name>              sandboxed login shell as the agent, secrets loaded
-agentctl run <name> -- <cmd...>    one sandboxed command as the agent, in its home
 agentctl secrets set|edit|list <name>
-agentctl matrix [status|introduce|rotate-token|deactivate|register-user]
+agentctl matrix [status|introduce <name>|rotate-token <name>|deactivate <name>]
 ```
-
-Everything agentctl knows comes from `/etc/agents/state.json`, rendered by
-the NixOS module; it has no Nix logic of its own.

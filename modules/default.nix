@@ -1,10 +1,6 @@
-# agentfleet — core NixOS module.
-#
-# Declares `services.agentfleet`: a set of AI agents, each running as its own
-# locked-down system user with its own home, systemd service and secrets
-# file. Harness-specific knowledge (how to run Hermes, ...) lives in
-# modules/harnesses/*.nix, which register themselves under
-# `services.agentfleet.harnesses.<name>`.
+# agentfleet — a fleet of Hermes agents on one NixOS host, each its own
+# locked-down system user, each with an account on the fleet's Matrix server
+# (modules/matrix.nix).
 #
 # Agents come from two places and are merged:
 #   1. `services.agentfleet.agents.<name> = { ... }`   — plain Nix
@@ -22,7 +18,6 @@
 
 let
   cfg = config.services.agentfleet;
-  mx = cfg.matrix;
 
   inherit (lib)
     mkOption
@@ -40,61 +35,69 @@ let
     optionalString
     optionalAttrs
     hasSuffix
-    hasPrefix
     removeSuffix
-    escapeShellArg
     splitString
     ;
 
-  # Also exported in state.json so agentctl validates names the same way.
+  # Fixed layout. Also exported in state.json for agentctl.
+  homeBase = "/srv/agents";
+  stateDir = "/var/lib/agents";
+  userPrefix = "agent-";
   nameRegex = "[a-z][a-z0-9-]{0,30}";
-  # Linux (and useradd) cap user names at 32 characters.
-  maxUserLength = 32;
+  maxUserLength = 32; # Linux user-name limit
+
+  # Secrets agentctl prompts for on `add`; Hermes picks the provider from them.
+  providerSecrets = [
+    {
+      name = "ANTHROPIC_API_KEY";
+      description = "Anthropic API key";
+    }
+    {
+      name = "OPENROUTER_API_KEY";
+      description = "OpenRouter API key";
+    }
+    {
+      name = "OPENAI_API_KEY";
+      description = "OpenAI or OpenAI-compatible endpoint key";
+    }
+  ];
 
   ## ----- TOML registry -------------------------------------------------------
-  # One file per agent: <registry.dir>/<name>.toml. Keys are snake_case in TOML
-  # and mapped onto the camelCase submodule options below.
   tomlKeyMap = {
-    harness = "harness";
     enable = "enable";
-    autostart = "autostart";
     model = "model";
+    description = "description";
     packages = "packages";
     memory_max = "memoryMax";
     cpu_quota = "cpuQuota";
     environment = "environment";
     settings = "settings";
-    description = "description";
-    secrets_file = "secretsFile";
     matrix = "matrix";
   };
   matrixKeyMap = {
-    enable = "enable";
     localpart = "localpart";
-    allowed_users = "allowedUsers";
-    introduce = "introduce";
   };
-
-  tomlFiles =
-    if cfg.registry.dir == null then
-      { }
-    else
-      filterAttrs (n: t: t == "regular" && hasSuffix ".toml" n) (builtins.readDir cfg.registry.dir);
 
   mapKeys =
     keyMap: what: fname: t:
     mapAttrs' (
       k: v:
       nameValuePair (keyMap.${k}
-        or (throw "agentfleet: unknown ${what} key '${k}' in registry file ${fname} (known: ${concatStringsSep ", " (attrNames keyMap)})")
+        or (throw "agentfleet: unknown ${what}key '${k}' in registry file ${fname} (known: ${concatStringsSep ", " (attrNames keyMap)})")
       ) v
     ) t;
 
   fromToml =
     fname: t:
-    mapAttrs (k: v: if k == "matrix" then mapKeys matrixKeyMap "[matrix]" fname v else v) (
+    mapAttrs (k: v: if k == "matrix" then mapKeys matrixKeyMap "[matrix] " fname v else v) (
       mapKeys tomlKeyMap "" fname t
     );
+
+  tomlFiles =
+    if cfg.registry.dir == null then
+      { }
+    else
+      filterAttrs (n: t: t == "regular" && hasSuffix ".toml" n) (builtins.readDir cfg.registry.dir);
 
   tomlAgents = mapAttrs' (
     fname: _:
@@ -103,190 +106,31 @@ let
     )
   ) tomlFiles;
 
-  ## ----- submodules ----------------------------------------------------------
-  secretModule = types.submodule {
-    options = {
-      name = mkOption {
-        type = types.str;
-        description = "Environment variable name.";
-      };
-      required = mkOption {
-        type = types.bool;
-        default = false;
-        description = "agentctl refuses to create an agent without this secret.";
-      };
-      description = mkOption {
-        type = types.str;
-        default = "";
-        description = "Shown by agentctl when prompting.";
-      };
-    };
-  };
-
-  fileModule = types.submodule {
-    options = {
-      text = mkOption {
-        type = types.str;
-        description = "File contents.";
-      };
-      mode = mkOption {
-        type = types.enum [
-          "seed"
-          "managed"
-        ];
-        default = "seed";
-        description = ''
-          `seed`: a real file, written only if it does not exist yet, so the
-          harness and the agent may edit it afterwards. `managed`: a symlink
-          into the Nix store, replaced on every activation; the agent cannot
-          edit it and `perms` is ignored.
-        '';
-      };
-      perms = mkOption {
-        type = types.str;
-        default = "0600";
-        description = "Octal permissions.";
-      };
-    };
-  };
-
-  # Plain values only: they are rendered both into the unit and into
-  # state.json for `systemd-run -p`.
-  sandboxValue = types.oneOf [
-    types.bool
-    types.int
-    types.str
-    (types.listOf types.str)
-  ];
-
-  harnessModule = types.submodule {
-    options = {
-      description = mkOption {
-        type = types.str;
-        default = "";
-        description = "One line shown by `agentctl harnesses`.";
-      };
-      package = mkOption {
-        type = types.nullOr types.package;
-        default = null;
-        description = "Main package of the harness, put on the agent's PATH.";
-      };
-      packages = mkOption {
-        type = types.listOf types.package;
-        default = [ ];
-        description = "Extra runtime dependencies on the agent's PATH.";
-      };
-      secrets = mkOption {
-        type = types.listOf secretModule;
-        default = [ ];
-        description = "Secrets this harness understands; agentctl prompts for them on `add`.";
-      };
-      environment = mkOption {
-        type = types.functionTo (types.attrsOf types.str);
-        default = _: { };
-        description = "agent -> non-secret environment for the service and the login shell.";
-      };
-      exec = mkOption {
-        type = types.functionTo (types.nullOr types.str);
-        default = _: null;
-        description = ''
-          agent -> command line for the long-running service, or null for an
-          on-demand harness that is only used through `agentctl run`.
-        '';
-      };
-      init = mkOption {
-        type = types.functionTo types.lines;
-        default = _: "";
-        description = "agent -> shell script run once, as the agent user, on first start.";
-      };
-      files = mkOption {
-        type = types.functionTo (types.attrsOf fileModule);
-        default = _: { };
-        description = "agent -> files to render into the agent's home (paths relative to home).";
-      };
-      sandbox = mkOption {
-        type = types.functionTo (types.attrsOf sandboxValue);
-        default = _: { };
-        example = lib.literalExpression "_: { RestrictNamespaces = false; }";
-        description = ''
-          agent -> overrides for the built-in systemd sandbox. Applied to the
-          service, the init unit and to `agentctl run`/`shell` alike. Use it
-          when a harness needs something the defaults forbid, for example
-          user namespaces for its own bubblewrap tool sandbox.
-        '';
-      };
-      serviceConfig = mkOption {
-        type = types.functionTo types.attrs;
-        default = _: { };
-        description = "agent -> extra systemd serviceConfig for the main service only.";
-      };
-      shellInit = mkOption {
-        type = types.functionTo types.lines;
-        default = _: "";
-        description = "agent -> lines appended to the agent's seeded .bashrc.";
-      };
-      supportsMatrix = mkOption {
-        type = types.bool;
-        default = false;
-        description = ''
-          The harness reads MATRIX_HOMESERVER, MATRIX_USER_ID, MATRIX_ALLOWED_USERS,
-          MATRIX_ACCESS_TOKEN and MATRIX_DEVICE_ID from its environment, so the
-          built-in Matrix server can provision accounts for its agents.
-        '';
-      };
-    };
-  };
-
+  ## ----- agent submodule -----------------------------------------------------
   agentModule =
-    { name, config, ... }:
+    { name, ... }:
     {
       options = {
-        matrix = {
-          enable = mkOption {
-            type = types.bool;
-            default = mx.enable && (cfg.harnesses.${config.harness}.supportsMatrix or false);
-            defaultText = lib.literalExpression "services.agentfleet.matrix.enable && <harness supports Matrix>";
-            description = "Give this agent an account on the fleet's Matrix server.";
-          };
-          localpart = mkOption {
-            type = types.str;
-            default = name;
-            description = "User id local part: @<localpart>:<serverName>. Change it if the old id was deactivated.";
-          };
-          allowedUsers = mkOption {
-            type = types.listOf types.str;
-            default = [ ];
-            description = "Matrix users allowed to talk to this agent, in addition to the operator.";
-          };
-          introduce = mkOption {
-            type = types.bool;
-            default = true;
-            description = "Send the operator a DM introducing this agent once its account exists.";
-          };
-        };
-        harness = mkOption {
-          type = types.str;
-          description = "Name of a harness under services.agentfleet.harnesses.";
-        };
         enable = mkOption {
           type = types.bool;
           default = true;
           description = "When false the agent is kept in the registry but nothing is deployed.";
         };
-        autostart = mkOption {
-          type = types.bool;
-          default = true;
-          description = "Start the agent's service at boot (ignored for on-demand harnesses).";
-        };
         model = mkOption {
           type = types.nullOr types.str;
           default = null;
-          description = "Default model id, passed to the harness in its own config format.";
+          example = "anthropic/claude-sonnet-5.5";
+          description = "Hermes model id, seeded as model.default in config.yaml.";
+        };
+        description = mkOption {
+          type = types.str;
+          default = "";
+          description = "Free text, shown by `agentctl list` and in the agent's introduction.";
         };
         packages = mkOption {
           type = types.listOf (types.either types.str types.package);
           default = [ ];
-          description = "Extra packages on the agent's PATH. Strings are looked up in pkgs (dots allowed).";
+          description = "Extra packages on the agent's PATH (for Hermes's tools). Strings are looked up in pkgs.";
         };
         memoryMax = mkOption {
           type = types.nullOr types.str;
@@ -303,42 +147,25 @@ let
         environment = mkOption {
           type = types.attrsOf types.str;
           default = { };
-          description = "Extra non-secret environment variables.";
+          description = "Extra non-secret environment variables (e.g. MATRIX_FREE_RESPONSE_ROOMS).";
         };
         settings = mkOption {
           type = types.attrs;
           default = { };
           description = ''
-            Harness-specific settings, merged into the harness's own config
-            file. Ends up in the world-readable Nix store: never put secrets
-            here, use the secrets file.
+            Hermes config.yaml keys, seeded on first start. Ends up in the
+            world-readable Nix store: never put secrets here.
           '';
         };
-        description = mkOption {
+        matrix.localpart = mkOption {
           type = types.str;
-          default = "";
-          description = "Free text, shown by `agentctl list`.";
-        };
-        secretsFile = mkOption {
-          type = types.str;
-          default = "${cfg.stateDir}/${name}/secrets.env";
-          defaultText = lib.literalExpression ''"''${services.agentfleet.stateDir}/<name>/secrets.env"'';
-          description = ''
-            KEY=VALUE file loaded into the service and into `agentctl run/shell`.
-            Point this at a sops-nix or agenix secret to manage it declaratively.
-            The file must exist; the default one is created empty.
-          '';
-        };
-        extraServiceConfig = mkOption {
-          type = types.attrs;
-          default = { };
-          description = "Extra systemd serviceConfig merged last into the main service.";
+          default = name;
+          description = "Matrix user id local part: @<localpart>:<serverName>. Change it if the old id was deactivated.";
         };
       };
     };
 
   ## ----- resolution ----------------------------------------------------------
-  # Nix-defined and registry agents, tagged with where they came from.
   allAgents =
     mapAttrs (_: a: a // { source = "nix"; }) cfg.agents
     // mapAttrs (_: a: a // { source = "toml"; }) cfg.registry.agents;
@@ -355,377 +182,253 @@ let
   resolve =
     name: a:
     let
-      hc = cfg.harnesses.${a.harness};
-      user = "${cfg.userPrefix}${name}";
-      home = "${cfg.homeBase}/${name}";
-      matrix = {
-        inherit (a.matrix) enable localpart introduce;
-        userId = if a.matrix.enable then "@${a.matrix.localpart}:${mx.serverName}" else null;
-        homeserver = if a.matrix.enable then mx.clientUrl else null;
-        allowedUsers = lib.unique (
-          optional (mx.operator != null) mx.operator ++ mx.extraAllowedUsers ++ a.matrix.allowedUsers
-        );
-        envFile = "${cfg.stateDir}/${name}/matrix.env";
-      };
-      self = {
-        inherit
-          name
-          user
-          home
-          matrix
-          ;
-        group = user;
-        inherit (a)
-          harness
-          model
-          settings
-          description
-          autostart
-          secretsFile
-          ;
-        stateDir = "${cfg.stateDir}/${name}";
-        serviceName = "agent-${name}";
-        initServiceName = "agent-${name}-init";
-        harnessCfg = hc;
-        raw = a;
-        packages =
-          (optional (hc.package != null) hc.package)
-          ++ hc.packages
-          ++ map resolvePkg a.packages
-          ++ cfg.commonPackages;
-        envVars = {
-          HOME = home;
-          AGENT_NAME = name;
-          AGENT_HARNESS = a.harness;
-        }
-        // optionalAttrs matrix.enable {
-          MATRIX_HOMESERVER = matrix.homeserver;
-          MATRIX_USER_ID = matrix.userId;
-          MATRIX_ALLOWED_USERS = concatStringsSep "," matrix.allowedUsers;
-        }
-        // hc.environment self
-        // a.environment;
-        # The user-managed secrets file, then the token file the Matrix
-        # reconciler writes (later files win).
-        envFiles = [ a.secretsFile ] ++ optional matrix.enable matrix.envFile;
-        exec = hc.exec self;
-      };
+      user = "${userPrefix}${name}";
+      home = "${homeBase}/${name}";
     in
-    self;
-
-  enabledAgents = filterAttrs (_: a: a.enable && cfg.harnesses ? ${a.harness}) allAgents;
-  agents = mapAttrs resolve enabledAgents;
-  serviceAgents = filterAttrs (_: ag: ag.exec != null) agents;
-
-  profileOf =
-    ag:
-    pkgs.buildEnv {
-      name = "agent-${ag.name}-profile";
-      paths = ag.packages;
-      ignoreCollisions = true;
+    {
+      inherit name user home;
+      group = user;
+      inherit (a)
+        model
+        description
+        settings
+        source
+        memoryMax
+        cpuQuota
+        ;
+      stateDir = "${stateDir}/${name}";
+      secretsFile = "${stateDir}/${name}/secrets.env";
+      matrixEnvFile = "${stateDir}/${name}/matrix.env";
+      localpart = a.matrix.localpart;
+      userId = "@${a.matrix.localpart}:${cfg.matrix.serverName}";
+      serviceName = "agent-${name}";
+      initServiceName = "agent-${name}-init";
+      packages = [
+        cfg.hermesPackage
+        pkgs.git
+        pkgs.curl
+        pkgs.jq
+        pkgs.ripgrep
+        pkgs.openssh
+      ]
+      ++ map resolvePkg a.packages;
+      envVars = {
+        HOME = home;
+        AGENT_NAME = name;
+        HERMES_HOME = "${home}/.hermes";
+        MATRIX_HOMESERVER = cfg.matrix.clientUrl;
+        MATRIX_USER_ID = "@${a.matrix.localpart}:${cfg.matrix.serverName}";
+        MATRIX_ALLOWED_USERS = cfg.matrix.operator;
+        # Element encrypts the DMs it creates; optional mode joins them when
+        # the bundled crypto libraries initialise and keeps plain rooms working.
+        MATRIX_E2EE_MODE = "optional";
+      }
+      // a.environment;
     };
 
-  shellEnvFile =
+  enabledAgents = filterAttrs (_: a: a.enable) allAgents;
+  agents = mapAttrs resolve enabledAgents;
+
+  # Hermes rewrites config.yaml itself, so it is seeded once, never managed.
+  # YAML is a superset of JSON.
+  hermesConfig =
     ag:
-    concatStringsSep "\n" (
-      [ "# Generated by agentfleet for agent '${ag.name}'. Do not edit." ]
-      ++ mapAttrsToList (k: v: "export ${k}=${escapeShellArg v}") ag.envVars
-      ++ [
-        "export PATH=${profileOf ag}/bin:/run/wrappers/bin:/run/current-system/sw/bin"
-        ""
-      ]
+    pkgs.writeText "agent-${ag.name}-config.yaml" (
+      builtins.toJSON (
+        lib.recursiveUpdate (optionalAttrs (ag.model != null) { model.default = ag.model; }) ag.settings
+      )
     );
 
-  ## ----- rendered files in the agent's home -----------------------------------
-  defaultFiles = ag: {
-    ".bash_profile" = {
-      mode = "managed";
-      perms = "0644";
-      text = ''
-        # Managed by agentfleet. Put personal additions in ~/.bashrc.
-        [ -r /etc/agents/${ag.name}.sh ] && . /etc/agents/${ag.name}.sh
-        [ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
-      '';
-    };
-    ".bashrc" = {
-      mode = "seed";
-      perms = "0644";
-      text = ''
-        # Seeded by agentfleet; this file is yours to edit.
-        [ -r /etc/agents/${ag.name}.sh ] && . /etc/agents/${ag.name}.sh
-        ${ag.harnessCfg.shellInit ag}
-      '';
-    };
-  };
-
-  allFiles = ag: defaultFiles ag // ag.harnessCfg.files ag;
-
-  # "a/b/c" -> [ "a" "a/b" ]
-  parentDirs =
-    rel:
-    let
-      parts = lib.init (splitString "/" rel);
-    in
-    lib.genList (i: concatStringsSep "/" (lib.take (i + 1) parts)) (builtins.length parts);
-
-  ownedDir = ag: {
-    d = {
+  tmpfilesFor = ag: {
+    ${ag.home}.d = {
       user = ag.user;
       group = ag.group;
       mode = "0750";
     };
+    "${ag.home}/.hermes".d = {
+      user = ag.user;
+      group = ag.group;
+      mode = "0750";
+    };
+    "${ag.home}/.hermes/config.yaml".C = {
+      argument = toString (hermesConfig ag);
+      user = ag.user;
+      group = ag.group;
+      mode = "0600";
+    };
+    ${ag.stateDir}.d = {
+      user = "root";
+      group = "root";
+      mode = "0700";
+    };
+    ${ag.secretsFile}.f = {
+      user = "root";
+      group = "root";
+      mode = "0400";
+    };
   };
-
-  # systemd-tmpfiles rules: directories, the default secrets file, and the
-  # harness files. `C` copies only when the destination is missing (seed);
-  # `L+` (re)points a symlink at the store every time (managed). Note that
-  # `C+` would not replace an existing file.
-  tmpfilesFor =
-    ag:
-    {
-      ${ag.home} = ownedDir ag;
-      ${ag.stateDir}.d = {
-        user = "root";
-        group = "root";
-        mode = "0700";
-      };
-    }
-    // optionalAttrs (ag.secretsFile == "${ag.stateDir}/secrets.env") {
-      ${ag.secretsFile}.f = {
-        user = "root";
-        group = "root";
-        mode = "0400";
-      };
-    }
-    // lib.foldl' (acc: x: acc // x) { } (
-      mapAttrsToList (
-        rel: f:
-        lib.genAttrs (map (d: "${ag.home}/${d}") (parentDirs rel)) (_: ownedDir ag)
-        // {
-          "${ag.home}/${rel}" =
-            let
-              src = toString (pkgs.writeText "agent-${ag.name}-${baseNameOf rel}" f.text);
-            in
-            if f.mode == "managed" then
-              {
-                "L+" = {
-                  argument = src;
-                  user = ag.user;
-                  group = ag.group;
-                };
-              }
-            else
-              {
-                C = {
-                  argument = src;
-                  user = ag.user;
-                  group = ag.group;
-                  mode = f.perms;
-                };
-              };
-        }
-      ) (allFiles ag)
-    );
 
   ## ----- systemd -------------------------------------------------------------
-  # One sandbox definition for everything that runs as the agent: the main
-  # service, the init unit, and `agentctl run`/`shell` (via systemd-run, see
-  # state.json below). Harnesses adjust it through their `sandbox` option.
-  sandboxOf =
-    ag:
-    {
-      NoNewPrivileges = true;
-      CapabilityBoundingSet = "";
-      ProtectSystem = "strict";
-      # ProtectHome hides /home entirely; only safe when agents live elsewhere.
-      ProtectHome = !(hasPrefix "/home" cfg.homeBase);
-      ReadWritePaths = [ ag.home ];
-      PrivateTmp = true;
-      PrivateDevices = true;
-      ProtectProc = "invisible";
-      ProtectKernelTunables = true;
-      ProtectKernelModules = true;
-      ProtectKernelLogs = true;
-      ProtectControlGroups = true;
-      ProtectClock = true;
-      ProtectHostname = true;
-      RestrictSUIDSGID = true;
-      RestrictRealtime = true;
-      # Blocks user namespaces too, so a harness that sandboxes its own tool
-      # calls with bwrap/unshare must set `sandbox = _: { RestrictNamespaces = false; }`.
-      RestrictNamespaces = true;
-      # AF_NETLINK: getifaddrs(), which Node and Python call when binding.
-      RestrictAddressFamilies = [
-        "AF_UNIX"
-        "AF_INET"
-        "AF_INET6"
-        "AF_NETLINK"
-      ];
-      SystemCallArchitectures = "native";
-      LockPersonality = true;
-      UMask = "0077";
-    }
-    // ag.harnessCfg.sandbox ag;
-
-  # The same attrset as `Key=Value` strings for `systemd-run -p`.
-  unitValue =
-    v:
-    if builtins.isBool v then
-      (if v then "yes" else "no")
-    else if builtins.isList v then
-      concatStringsSep " " v
-    else
-      toString v;
-  sandboxProps = ag: mapAttrsToList (k: v: "${k}=${unitValue v}") (sandboxOf ag);
-
-  # Matrix-enabled agents start after their account and token exist.
-  matrixUnit = ag: optional ag.matrix.enable "agentfleet-matrix.service";
-
-  initService = ag: {
-    description = "agentfleet: first-run initialisation for agent ${ag.name}";
-    wantedBy = [ "multi-user.target" ];
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" ] ++ matrixUnit ag;
-    requires = matrixUnit ag;
-    unitConfig.ConditionPathExists = "!${ag.home}/.agentfleet/initialized";
-    path = ag.packages;
-    environment = ag.envVars;
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = ag.user;
-      Group = ag.group;
-      WorkingDirectory = ag.home;
-      EnvironmentFile = ag.envFiles;
-    }
-    // sandboxOf ag;
-    script = ''
-      set -euo pipefail
-      ${ag.harnessCfg.init ag}
-      mkdir -p "$HOME/.agentfleet"
-      date -Is > "$HOME/.agentfleet/initialized"
-    '';
+  sandbox = ag: {
+    NoNewPrivileges = true;
+    CapabilityBoundingSet = "";
+    ProtectSystem = "strict";
+    ProtectHome = true;
+    ReadWritePaths = [ ag.home ];
+    PrivateTmp = true;
+    PrivateDevices = true;
+    ProtectProc = "invisible";
+    ProtectKernelTunables = true;
+    ProtectKernelModules = true;
+    ProtectKernelLogs = true;
+    ProtectControlGroups = true;
+    ProtectClock = true;
+    ProtectHostname = true;
+    RestrictSUIDSGID = true;
+    RestrictRealtime = true;
+    RestrictNamespaces = true;
+    # AF_NETLINK: getifaddrs(), which Python calls when binding.
+    RestrictAddressFamilies = [
+      "AF_UNIX"
+      "AF_INET"
+      "AF_INET6"
+      "AF_NETLINK"
+    ];
+    SystemCallArchitectures = "native";
+    LockPersonality = true;
+    UMask = "0077";
   };
 
-  mainService = ag: {
-    description = "agentfleet: agent ${ag.name} (${ag.harness})";
-    wantedBy = optional ag.autostart "multi-user.target";
-    requires = [ "${ag.initServiceName}.service" ] ++ matrixUnit ag;
+  common = ag: {
     wants = [ "network-online.target" ];
     after = [
-      "${ag.initServiceName}.service"
       "network-online.target"
-    ]
-    ++ matrixUnit ag;
+      "agentfleet-matrix.service"
+    ];
+    requires = [ "agentfleet-matrix.service" ];
     path = ag.packages;
     environment = ag.envVars;
-    serviceConfig = mkMerge [
-      (
-        {
-          User = ag.user;
-          Group = ag.group;
-          WorkingDirectory = ag.home;
-          ExecStart = ag.exec;
-          EnvironmentFile = ag.envFiles;
-          Restart = "on-failure";
-          RestartSec = 5;
-        }
-        // sandboxOf ag
-        // optionalAttrs (ag.raw.memoryMax != null) { MemoryMax = ag.raw.memoryMax; }
-        // optionalAttrs (ag.raw.cpuQuota != null) { CPUQuota = ag.raw.cpuQuota; }
-      )
-      (ag.harnessCfg.serviceConfig ag)
-      ag.raw.extraServiceConfig
-    ];
   };
+
+  initService =
+    ag:
+    common ag
+    // {
+      description = "agentfleet: first-run initialisation for agent ${ag.name}";
+      wantedBy = [ "multi-user.target" ];
+      unitConfig.ConditionPathExists = "!${ag.home}/.agentfleet/initialized";
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        User = ag.user;
+        Group = ag.group;
+        WorkingDirectory = ag.home;
+        EnvironmentFile = [
+          ag.secretsFile
+          ag.matrixEnvFile
+        ];
+      }
+      // sandbox ag;
+      script = ''
+        set -euo pipefail
+        mkdir -p "$HOME/.agentfleet"
+        date -Is > "$HOME/.agentfleet/initialized"
+      '';
+    };
+
+  mainService =
+    ag:
+    let
+      c = common ag;
+    in
+    c
+    // {
+      description = "agentfleet: Hermes agent ${ag.name}";
+      wantedBy = [ "multi-user.target" ];
+      requires = c.requires ++ [ "${ag.initServiceName}.service" ];
+      after = c.after ++ [ "${ag.initServiceName}.service" ];
+      serviceConfig = {
+        User = ag.user;
+        Group = ag.group;
+        WorkingDirectory = ag.home;
+        ExecStart = "${lib.getExe' cfg.hermesPackage "hermes"} gateway";
+        EnvironmentFile = [
+          ag.secretsFile
+          ag.matrixEnvFile
+        ];
+        Restart = "on-failure";
+        RestartSec = 5;
+      }
+      // sandbox ag
+      // optionalAttrs (ag.memoryMax != null) { MemoryMax = ag.memoryMax; }
+      // optionalAttrs (ag.cpuQuota != null) { CPUQuota = ag.cpuQuota; };
+    };
 
   ## ----- state for agentctl --------------------------------------------------
   stateJson = builtins.toJSON {
-    version = 1;
-    inherit (cfg)
+    version = 2;
+    inherit
       homeBase
       stateDir
       userPrefix
-      flakeDir
-      rebuildCommand
+      nameRegex
+      maxUserLength
       ;
-    inherit nameRegex maxUserLength;
+    inherit (cfg) flakeDir;
+    inherit (cfg) rebuildCommand;
     registry = {
       hostPath = cfg.registry.hostPath;
       enabled = cfg.registry.dir != null;
     };
+    secrets = providerSecrets;
     matrix = {
-      enabled = mx.enable;
-      ctl = if mx.enable then "${mx.package}/bin/agentfleet-matrix" else null;
+      inherit (cfg.matrix) serverName operator;
+      ctl = "${cfg.matrix.package}/bin/agentfleet-matrix";
     };
-    harnesses = mapAttrs (_: h: {
-      inherit (h) description secrets;
-    }) cfg.harnesses;
     agents =
       mapAttrs (_: ag: {
         enabled = true;
         inherit (ag)
           user
-          group
           home
-          harness
+          stateDir
+          secretsFile
+          source
           model
           description
-          autostart
-          secretsFile
-          stateDir
+          userId
           ;
-        source = ag.raw.source;
-        service = if ag.exec != null then "${ag.serviceName}.service" else null;
+        service = "${ag.serviceName}.service";
         initService = "${ag.initServiceName}.service";
-        env = ag.envVars;
-        envFiles = ag.envFiles;
-        path = "${profileOf ag}/bin";
-        shell = "${pkgs.bashInteractive}/bin/bash";
-        sandbox = sandboxProps ag;
-        matrix = {
-          inherit (ag.matrix) enable userId;
-        };
       }) agents
       // mapAttrs (name: a: {
         enabled = false;
-        inherit (a)
-          harness
-          model
-          description
-          source
-          ;
-        user = "${cfg.userPrefix}${name}";
-        home = "${cfg.homeBase}/${name}";
-        stateDir = "${cfg.stateDir}/${name}";
-        secretsFile = a.secretsFile;
+        inherit (a) source model description;
+        user = "${userPrefix}${name}";
+        home = "${homeBase}/${name}";
+        stateDir = "${stateDir}/${name}";
+        secretsFile = "${stateDir}/${name}/secrets.env";
+        userId = "@${a.matrix.localpart}:${cfg.matrix.serverName}";
         service = null;
       }) (filterAttrs (_: a: !a.enable) allAgents);
   };
 
 in
 {
+  imports = [ ./matrix.nix ];
+
   options.services.agentfleet = {
     enable = mkOption {
       type = types.bool;
       default = cfg.registry.dir != null || allAgents != { };
       defaultText = lib.literalExpression "services.agentfleet.registry.dir != null || <any agent defined>";
-      description = ''
-        Install agentctl and deploy the agents declared below. On by default
-        as soon as a registry directory is configured or any agent is defined.
-      '';
+      description = "Run the fleet: Matrix server, agentctl, and the agents declared below.";
     };
 
     agents = mkOption {
       type = types.attrsOf (types.submodule agentModule);
       default = { };
       description = "Agents defined in Nix. Merged with the TOML registry.";
-    };
-
-    harnesses = mkOption {
-      type = types.attrsOf harnessModule;
-      default = { };
-      description = "Available harness recipes. Built-ins are registered by modules/harnesses.";
     };
 
     registry = {
@@ -755,73 +458,29 @@ in
     flakeDir = mkOption {
       type = types.str;
       default = "/etc/nixos";
-      description = "Checkout of the flake that configures this host.";
+      description = "Checkout of the flake that configures this host; agentctl runs `nixos-rebuild switch --flake` on it.";
     };
 
     rebuildCommand = mkOption {
       type = types.str;
-      default = "nixos-rebuild {action} --flake ${cfg.flakeDir}";
-      defaultText = lib.literalExpression ''"nixos-rebuild {action} --flake ''${services.agentfleet.flakeDir}"'';
-      description = ''
-        Command `agentctl add`/`rm` run after changing the registry. `{action}`
-        is replaced by `switch`. Change it for colmena, deploy-rs, or a
-        non-flake configuration.
-      '';
+      default = "nixos-rebuild switch --flake ${cfg.flakeDir}";
+      defaultText = lib.literalExpression ''"nixos-rebuild switch --flake ''${services.agentfleet.flakeDir}"'';
+      internal = true;
+      description = "What agentctl add/rm run after changing the registry (overridden by the VM test).";
     };
 
-    homeBase = mkOption {
-      type = types.str;
-      default = "/srv/agents";
-      description = "Agent homes are created at <homeBase>/<name>.";
-    };
-
-    stateDir = mkOption {
-      type = types.str;
-      default = "/var/lib/agents";
-      description = "Root-owned per-agent state: <stateDir>/<name>/secrets.env.";
-    };
-
-    userPrefix = mkOption {
-      type = types.str;
-      default = "agent-";
-      description = "Unix user and group name prefix.";
-    };
-
-    commonPackages = mkOption {
-      type = types.listOf types.package;
-      default = with pkgs; [
-        git
-        curl
-        jq
-        ripgrep
-        openssh
-      ];
-      defaultText = lib.literalExpression "with pkgs; [ git curl jq ripgrep openssh ]";
-      description = "Packages on every agent's PATH.";
-    };
-
-    cliPackage = mkOption {
+    hermesPackage = mkOption {
       type = types.package;
-      default = pkgs.callPackage ../pkgs/agentctl { };
-      defaultText = lib.literalExpression "pkgs.callPackage ../pkgs/agentctl { }";
-      description = "The agentctl package.";
-    };
-
-    installCli = mkOption {
-      type = types.bool;
-      default = true;
-      description = "Put agentctl in environment.systemPackages.";
+      description = "The Hermes Agent package. agentfleet.nixosModules.default sets it from the hermes-agent flake input.";
     };
 
     resolvedAgents = mkOption {
       type = types.attrs;
       default = { };
       internal = true;
-      description = "Enabled agents after resolution, for sibling modules (matrix.nix).";
+      description = "Enabled agents after resolution, for matrix.nix.";
     };
   };
-
-  imports = [ ./matrix.nix ];
 
   config = mkMerge [
     { services.agentfleet.registry.agents = tomlAgents; }
@@ -830,15 +489,13 @@ in
       services.agentfleet.resolvedAgents = mapAttrs (_: ag: {
         inherit (ag)
           name
-          user
-          home
-          stateDir
-          harness
+          localpart
+          userId
+          matrixEnvFile
           model
           description
-          matrix
           ;
-        service = if ag.exec != null then "${ag.serviceName}.service" else null;
+        service = "${ag.serviceName}.service";
       }) agents;
 
       assertions =
@@ -847,19 +504,11 @@ in
           message = "agentfleet: agent name '${name}' must match ${nameRegex}";
         }) allAgents)
         ++ (mapAttrsToList (name: a: {
-          assertion = lib.stringLength "${cfg.userPrefix}${name}" <= maxUserLength;
-          message = "agentfleet: user name '${cfg.userPrefix}${name}' is longer than ${toString maxUserLength} characters; shorten the agent name or userPrefix";
+          assertion = lib.stringLength "${userPrefix}${name}" <= maxUserLength;
+          message = "agentfleet: user name '${userPrefix}${name}' is longer than ${toString maxUserLength} characters; shorten the agent name";
         }) allAgents)
         ++ (mapAttrsToList (name: a: {
-          assertion = cfg.harnesses ? ${a.harness};
-          message = "agentfleet: agent '${name}' uses unknown harness '${a.harness}' (available: ${concatStringsSep ", " (attrNames cfg.harnesses)})";
-        }) allAgents)
-        ++ (mapAttrsToList (name: a: {
-          assertion = !a.matrix.enable || mx.enable;
-          message = "agentfleet: agent '${name}' has matrix.enable but services.agentfleet.matrix.enable is off";
-        }) allAgents)
-        ++ (mapAttrsToList (name: a: {
-          assertion = !a.matrix.enable || builtins.match "[a-z0-9._=/+-]+" a.matrix.localpart != null;
+          assertion = builtins.match "[a-z0-9._=/+-]+" a.matrix.localpart != null;
           message = "agentfleet: agent '${name}': matrix.localpart '${a.matrix.localpart}' is not a valid Matrix localpart";
         }) allAgents)
         ++ [
@@ -876,7 +525,6 @@ in
           group = ag.group;
           home = ag.home;
           createHome = false;
-          shell = pkgs.bashInteractive;
           # GECOS field: no colons or newlines allowed.
           description =
             "agentfleet agent ${ag.name}"
@@ -889,30 +537,21 @@ in
       users.groups = mapAttrs' (_: ag: nameValuePair ag.group { }) agents;
 
       systemd.tmpfiles.settings."50-agentfleet" = {
-        ${cfg.homeBase}.d.mode = "0755";
-        ${cfg.stateDir}.d.mode = "0700";
+        ${homeBase}.d.mode = "0755";
+        ${stateDir}.d.mode = "0700";
       }
       // lib.foldl' (acc: x: acc // x) { } (mapAttrsToList (_: tmpfilesFor) agents);
 
       systemd.services =
         (mapAttrs' (_: ag: nameValuePair ag.initServiceName (initService ag)) agents)
-        // (mapAttrs' (_: ag: nameValuePair ag.serviceName (mainService ag)) serviceAgents);
+        // (mapAttrs' (_: ag: nameValuePair ag.serviceName (mainService ag)) agents);
 
-      environment.etc = {
-        "agents/state.json" = {
-          text = stateJson;
-          mode = "0644";
-        };
-      }
-      // mapAttrs' (
-        _: ag:
-        nameValuePair "agents/${ag.name}.sh" {
-          text = shellEnvFile ag;
-          mode = "0644";
-        }
-      ) agents;
+      environment.etc."agents/state.json" = {
+        text = stateJson;
+        mode = "0644";
+      };
 
-      environment.systemPackages = optional cfg.installCli cfg.cliPackage;
+      environment.systemPackages = [ (pkgs.callPackage ../pkgs/agentctl { }) ];
     })
   ];
 }

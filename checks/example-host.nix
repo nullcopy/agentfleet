@@ -1,5 +1,5 @@
-# Exercises the built-in harness, an inline test harness and both agent
-# sources. Used by `nix flake check` (evaluation only) and handy as a reference.
+# Exercises both agent sources and the Matrix server. Used by `nix flake check`
+# (evaluation only) and handy as a reference.
 { pkgs, lib, ... }:
 
 {
@@ -9,7 +9,6 @@
     device = "none";
     fsType = "tmpfs";
   };
-
   networking.hostName = "example";
 
   services.agentfleet = {
@@ -17,39 +16,18 @@
     flakeDir = "/etc/nixos";
 
     matrix = {
-      enable = true;
       serverName = "matrix.example.org";
-      operator = "@me:example.org";
-    };
-
-    # A minimal harness defined on the host itself: any command as a service.
-    harnesses.custom = {
-      description = "run settings.exec as the agent";
-      exec = ag: ag.settings.exec or null;
-      init = ag: ag.settings.init or "";
-    };
-
-    agents.echo = {
-      harness = "custom";
-      settings.exec = "${pkgs.coreutils}/bin/sleep infinity";
-      memoryMax = "256M";
+      operator = "@alice:example.com";
     };
 
     agents.scribe = {
-      harness = "hermes";
       model = "anthropic/claude-sonnet-5.5";
-      description = "second Hermes agent";
+      description = "writes things down";
       matrix.localpart = "scribe2";
-      matrix.allowedUsers = [ "@friend:example.org" ];
-    };
-
-    agents.quiet = {
-      harness = "hermes";
-      matrix.enable = false;
+      memoryMax = "4G";
     };
 
     agents.parked = {
-      harness = "hermes";
       enable = false;
     };
   };

@@ -1,13 +1,12 @@
-# One agent per file. Keys are snake_case; see README "Registry format".
-harness = "hermes"
+# One agent per file. Keys: enable, model, description, packages, memory_max,
+# cpu_quota, [environment], [settings], [matrix].
 model = "anthropic/claude-sonnet-5.5"
-description = "long-running research assistant on Telegram"
-autostart = true
+description = "long-running research assistant"
 memory_max = "4G"
 packages = ["python3", "nodejs"]
 
 [environment]
-TZ = "America/Chicago"
+TZ = "UTC"
 
-[settings.gateway.platforms.telegram]
-enabled = true
+[settings.model]
+provider = "anthropic"

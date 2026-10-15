@@ -286,13 +286,13 @@ def intro_message(spec, name, a):
     desc = a.get("description") or ""
     model = a.get("model") or "default model"
     text = (
-        f"Hello! I'm {name}, a {a['harness']} agent running on {spec['hostName']} ({model})."
+        f"Hello! I'm {name}, a Hermes agent running on {spec['hostName']} ({model})."
         + (f" {desc[0].upper() + desc[1:]}." if desc else "")
         + f" This room is our direct line: message me here any time. "
         f"In other rooms, invite me and mention @{a['localpart']} to get my attention."
     )
     html = (
-        f"Hello! I'm <b>{name}</b>, a {a['harness']} agent running on <code>{spec['hostName']}</code> ({model})."
+        f"Hello! I'm <b>{name}</b>, a Hermes agent running on <code>{spec['hostName']}</code> ({model})."
         + (f" {desc[0].upper() + desc[1:]}." if desc else "")
         + f" This room is our direct line: message me here any time. "
         f"In other rooms, invite me and mention <code>@{a['localpart']}</code> to get my attention."
@@ -328,7 +328,7 @@ def provision(syn, spec, name, a, rec, force_token=False):
         if service_active(a.get("service")):
             subprocess.run(["systemctl", "restart", a["service"]], check=False)
             log(f"{name}: restarted {a['service']}")
-    if a.get("introduce") and spec.get("operator") and not rec.get("introduced_room"):
+    if not rec.get("introduced_room"):
         token = read_token(a["envFile"])
         text, html = intro_message(spec, name, a)
         try:
@@ -375,7 +375,7 @@ def cmd_status(spec, args):
         print(f"homeserver {spec['clientUrl']}: DOWN ({e})")
     admin = read_json(os.path.join(spec["stateDir"], "admin.json"))
     print(f"admin: {admin['user_id'] if admin else 'not bootstrapped'}")
-    print(f"operator: {spec.get('operator') or '-'}")
+    print(f"operator: {spec['operator']}")
     recs = all_records(spec)
     names = sorted(set(recs) | set(spec["agents"]))
     if not names:
@@ -430,16 +430,6 @@ def cmd_deactivate(spec, args):
     log(f"deactivated {rec['user_id']} (this id can never be registered again)")
 
 
-def cmd_register_user(spec, args):
-    """Create an ordinary (or admin) human account on this homeserver and print
-    its access token. Handy for an operator account on the agents' own server."""
-    syn = Synapse(spec)
-    password = args.password or secrets.token_urlsafe(24)
-    tok = syn._register_shared_secret(args.localpart, password, admin=args.admin)
-    print(json.dumps({"user_id": tok["user_id"], "access_token": tok["access_token"],
-                      "password": password if not args.password else "(as given)"}, indent=2))
-
-
 def main():
     p = argparse.ArgumentParser(prog="agentfleet-matrix", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
@@ -455,11 +445,6 @@ def main():
     s = sub.add_parser("deactivate", help="permanently deactivate a removed agent's account")
     s.add_argument("name")
     s.set_defaults(func=cmd_deactivate)
-    s = sub.add_parser("register-user", help="create a human account on this homeserver (prints its token)")
-    s.add_argument("localpart")
-    s.add_argument("--admin", action="store_true")
-    s.add_argument("--password")
-    s.set_defaults(func=cmd_register_user)
     args = p.parse_args()
     if os.geteuid() != 0:
         die("must run as root")

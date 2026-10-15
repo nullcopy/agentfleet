@@ -1,5 +1,5 @@
 {
-  description = "agentfleet: one Unix user per AI agent, declared in NixOS and driven by agentctl";
+  description = "agentfleet: a fleet of Hermes agents on one NixOS host, each its own user, each on the fleet's Matrix server";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -26,26 +26,14 @@
       forAll = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in
     {
-      nixosModules = {
-        # Everything, with Hermes wired in from the flake input.
-        default =
-          { pkgs, lib, ... }:
-          {
-            imports = [ self.nixosModules.core ];
-            services.agentfleet.harnesses.hermes.package =
-              lib.mkDefault
-                hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;
-          };
-
-        # Module + built-in recipes, no flake-input packages. Set
-        # services.agentfleet.harnesses.hermes.package yourself if you use Hermes.
-        core = {
-          imports = [
-            ./modules
-            ./modules/harnesses
-          ];
+      nixosModules.default =
+        { pkgs, lib, ... }:
+        {
+          imports = [ ./modules ];
+          services.agentfleet.hermesPackage =
+            lib.mkDefault
+              hermes-agent.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
-      };
 
       packages = forAll (
         system: pkgs: rec {
@@ -54,11 +42,6 @@
           default = agentctl;
         }
       );
-
-      overlays.default = final: _prev: {
-        agentctl = final.callPackage ./pkgs/agentctl { };
-        agentfleet-matrix = final.callPackage ./pkgs/agentfleet-matrix { };
-      };
 
       checks = forAll (
         system: pkgs:
@@ -89,16 +72,18 @@
             fresh.config.environment.etc."agents/state.json".text;
         in
         {
-          # Evaluates every built-in recipe and renders the units. The string
-          # context is dropped so the agents' profiles are not built.
+          # Evaluates the module and renders the units. The string context is
+          # dropped so the agents' profiles are not built.
           eval = pkgs.writeText "agentfleet-eval" (
             builtins.unsafeDiscardStringContext (
               example.config.environment.etc."agents/state.json".text
               + "\n"
+              + example.config.environment.etc."agents/matrix.json".text
+              + "\n"
               + freshOk
               + "\n"
               + builtins.concatStringsSep "\n" (
-                nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent-") (
+                nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent") (
                   builtins.attrNames example.config.systemd.services
                 )
               )
