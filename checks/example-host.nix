@@ -18,6 +18,7 @@
     matrix = {
       serverName = "matrix.example.org";
       operator = "@alice:example.com";
+      listenAddresses = [ "10.0.0.2" ]; # reverse proxy on another machine
     };
 
     agents.scribe = {

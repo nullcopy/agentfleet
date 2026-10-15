@@ -30,7 +30,7 @@ What agentfleet is, in five points:
 4. Every agent is a Hermes agent connected to that Matrix server.
 5. You are expected to have your own Matrix id on another, pre-existing server.
 
-- [Install](docs/install.md): flake input, domain, DNS, reverse proxy, first rebuild.
+- [Install](docs/install.md): DNS, flake input, what to set in `configuration.nix`, the reverse proxy (Caddy), first rebuild.
 - [End-to-end example](docs/e2e-example.md): create an agent, receive its introduction, chat, remove it.
 - [Reference](docs/reference.md): registry format, what an agent gets, secrets, the sandbox, how the Matrix side works.
 

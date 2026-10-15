@@ -9,35 +9,49 @@ the fleet: each agent is a small TOML file inside it, `agentctl` edits those
 files and runs `nixos-rebuild` for you, and the NixOS module turns them into
 users, services and Matrix accounts.
 
-You need:
+## What you need
 
-- a NixOS host with flakes enabled and `git`
+Two machines, or one machine playing both roles:
+
+- **The fleet host.** NixOS with flakes enabled and `git`. Runs the agents and
+  the Matrix server (Synapse). It needs no public address.
+- **The proxy host.** Has a public, static IP address and runs your reverse
+  proxy with TLS. It must be able to reach the fleet host over some private
+  network (a VPN, a LAN, a cloud VPC: anything where plain HTTP between the
+  two is acceptable). If the fleet host itself has a public address, it can
+  be the proxy host too.
+
+Plus:
+
 - a domain you control, for the fleet's Matrix server
 - your own Matrix user id on an existing homeserver
 - an API key for the model provider the agents will use (Anthropic, OpenRouter or OpenAI)
 
 Names used below are placeholders, substitute your own everywhere:
-`matrix.example.org` (the fleet's Matrix server), `example.com` (where your
-own account lives), `myhost` (the NixOS host), `alice` (you).
 
-## 1. Point DNS at the host and open two ports
+| placeholder          | meaning                                                      |
+| -------------------- | ------------------------------------------------------------ |
+| `matrix.example.org` | the fleet's Matrix server name and public DNS name           |
+| `@alice:example.com` | you, on your existing homeserver                             |
+| `myhost`             | the fleet host, as named in the flake's `nixosConfigurations` |
+| `10.0.0.2`           | the fleet host's address on the private network               |
+| `203.0.113.5`        | the proxy host's public address                               |
 
-The agents talk to the Matrix server over loopback. Your account on
-`example.com` talks to them through Matrix federation, which needs
-`https://matrix.example.org` to be reachable from the internet.
+## 1. DNS and the public side
 
-- **Address.** The host needs a public IP address, IPv4 or IPv6, ideally both.
-  A static address is best. A dynamic one works with a DNS updater, but
-  federation breaks whenever the address changes until DNS catches up. Behind a
-  home router, forward TCP 80 and 443 to the host.
-- **DNS.** An `A` (and/or `AAAA`) record `matrix.example.org` pointing at that
-  address. No `SRV` record is needed. The record must resolve before the first
-  rebuild or the certificate request fails; NixOS keeps retrying, so this is
-  recoverable.
-- **Ports.** Inbound TCP 80 (certificate challenge, redirects) and TCP 443
-  (Matrix traffic). Port 8448, the historical federation port, is not needed.
-  Outbound HTTPS must be allowed. Port 8008 stays on loopback and is never
-  exposed.
+Your account on `example.com` reaches the agents through Matrix federation,
+which needs `https://matrix.example.org` to be reachable from the internet.
+That is the proxy host's job.
+
+- **DNS.** An `A` (and/or `AAAA`) record `matrix.example.org` pointing at the
+  proxy host's public address, `203.0.113.5`. No `SRV` record is needed.
+- **Ports on the proxy host.** Inbound TCP 80 (certificate challenge) and
+  TCP 443 (all Matrix traffic). Port 8448, the historical federation port, is
+  not needed because `.well-known` delegation below tells other servers to
+  use 443.
+- **Ports on the fleet host.** TCP 8008 open to the proxy host only, nothing
+  else. Outbound HTTPS must be allowed (federation to `example.com`, model
+  providers, certificate checks).
 - **Server name.** `matrix.example.org` is both the DNS name and the Matrix
   server name, so user ids look like `@scout:matrix.example.org`. If you would
   rather have `@scout:example.org`, use `serverName = "example.org"` and serve
@@ -48,7 +62,7 @@ The agents talk to the Matrix server over loopback. Your account on
 
 ## 2. Add the flake input and import the module
 
-In the host's `flake.nix`:
+In the fleet host's `flake.nix`:
 
 ```nix
 {
@@ -69,58 +83,112 @@ In the host's `flake.nix`:
 }
 ```
 
-## 3. Configure the fleet and the reverse proxy
+`myhost` must match the host's own `networking.hostName`, as it does for any
+flake-based NixOS system; agents mention that name when they introduce
+themselves.
 
-In `configuration.nix`:
+## 3. Configure the fleet host
+
+Add this to `configuration.nix`. Every value you must change is marked
+`CHANGE`; the rest can stay as written.
 
 ```nix
 services.agentfleet = {
   # Where this flake is checked out ON THE HOST. agentctl writes new agent
   # files here and runs `nixos-rebuild switch --flake <flakeDir>`.
-  flakeDir = "/etc/nixos";
+  flakeDir = "/etc/nixos";                            # CHANGE if your checkout lives elsewhere
 
   # The directory of per-agent TOML files, as a Nix path relative to this
   # file. It must be inside the flake so Nix can read it at build time.
   registry.dir = ./agents;
 
   matrix = {
-    serverName = "matrix.example.org";   # permanent, see step 1
-    operator = "@alice:example.com";     # you: allowed to talk to every agent, receives the intros
+    serverName = "matrix.example.org";                # CHANGE: permanent, see step 1
+    operator = "@alice:example.com";                  # CHANGE: your own Matrix id
+    listenAddresses = [ "10.0.0.2" ];                 # CHANGE: this host's address as the proxy sees it
   };
 };
 
-# TLS and the reverse proxy in front of Synapse (127.0.0.1:8008). agentfleet
-# does not manage this; any proxy works given the same four locations.
-services.nginx = {
-  enable = true;
-  virtualHosts."matrix.example.org" = {
-    enableACME = true;
-    forceSSL = true;
-    locations."/_matrix".proxyPass = "http://127.0.0.1:8008";
-    locations."/_synapse/client".proxyPass = "http://127.0.0.1:8008";
-    locations."= /.well-known/matrix/server".extraConfig = ''
-      default_type application/json;
-      return 200 '{"m.server": "matrix.example.org:443"}';
-    '';
-    locations."= /.well-known/matrix/client".extraConfig = ''
-      default_type application/json;
-      add_header Access-Control-Allow-Origin *;
-      return 200 '{"m.homeserver": {"base_url": "https://matrix.example.org"}}';
-    '';
-    extraConfig = "client_max_body_size 50M;";
-  };
-};
-security.acme = { acceptTerms = true; defaults.email = "admin@example.org"; };
-networking.firewall.allowedTCPPorts = [ 80 443 ];
+# Let only the proxy host reach Synapse. Use the interface the private
+# network comes in on (`ip addr` shows it; tailscale0, wg0, eth1, ...).
+networking.firewall.interfaces."eth1".allowedTCPPorts = [ 8008 ];  # CHANGE: interface name
 ```
 
-`flakeDir` and `registry.dir` describe the same directory from two sides: Nix
-needs a path it can read at evaluation time, agentctl needs the location on
-disk to write to. If your registry is not named `agents`, also set
-`registry.hostPath`. If the public URL is not `https://<serverName>`, set
-`matrix.publicBaseUrl`.
+What each value does:
 
-## 4. Create the registry directory and rebuild
+| value                    | meaning                                                                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `flakeDir`               | Path of the flake checkout on disk. `agentctl add` writes `<flakeDir>/agents/<name>.toml` and rebuilds from here.                                                           |
+| `registry.dir`           | The same `agents` directory as a Nix path, so the module can read the TOML files at build time. If you name it differently, also set `registry.hostPath` to the disk path. |
+| `matrix.serverName`      | The part after the colon in every agent's user id. Cannot change later.                                                                                                     |
+| `matrix.operator`        | The one Matrix user the agents accept messages and invites from, and DM when they come up. Must be on another homeserver.                                                   |
+| `matrix.listenAddresses` | Private addresses Synapse listens on, in addition to loopback. Leave it out when the proxy runs on the fleet host itself.                                                    |
+| `matrix.publicBaseUrl`   | Only if the public URL is not `https://<serverName>`.                                                                                                                       |
+| `matrix.listenPort`      | Only if 8008 clashes with something; default 8008.                                                                                                                          |
+
+Synapse speaks plain, unauthenticated HTTP on `listenAddresses`, and that
+listener includes the admin API. Never expose it beyond the proxy host; the
+firewall line above is not optional.
+
+## 4. Configure the reverse proxy
+
+On the proxy host, the proxy must do four things for `matrix.example.org`,
+whatever software it is:
+
+1. Terminate TLS with a valid certificate (Let's Encrypt is fine).
+2. Forward `/_matrix/*` and `/_synapse/client/*` to `http://10.0.0.2:8008`,
+   passing the `Host` header and `X-Forwarded-For` through. Synapse is
+   configured to trust those headers. Do not forward `/_synapse/admin`.
+3. Serve `/.well-known/matrix/server` with body
+   `{"m.server": "matrix.example.org:443"}` so other homeservers federate
+   over 443, and `/.well-known/matrix/client` with body
+   `{"m.homeserver": {"base_url": "https://matrix.example.org"}}` for clients.
+   Both as `application/json`; the client one needs
+   `Access-Control-Allow-Origin: *`.
+4. Allow request bodies of at least 50 MB (file uploads) and not cut off
+   responses that take 30 s or more (`/sync` long-polls).
+
+With [Caddy](https://caddyserver.com/), which handles TLS, `Host` and
+`X-Forwarded-For` by itself and has no body or response limits by default,
+that is this Caddyfile:
+
+```caddyfile
+matrix.example.org {
+    handle /_matrix/* {
+        reverse_proxy 10.0.0.2:8008
+    }
+
+    handle /_synapse/client/* {
+        reverse_proxy 10.0.0.2:8008
+    }
+
+    handle /.well-known/matrix/server {
+        header Content-Type application/json
+        respond `{"m.server": "matrix.example.org:443"}` 200
+    }
+
+    handle /.well-known/matrix/client {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *
+        respond `{"m.homeserver": {"base_url": "https://matrix.example.org"}}` 200
+    }
+
+    handle {
+        respond 404
+    }
+}
+```
+
+If the proxy host is itself NixOS, the same thing as
+`services.caddy.virtualHosts."matrix.example.org".extraConfig` with the
+outer braces removed, plus `networking.firewall.allowedTCPPorts = [ 80 443 ];`.
+
+If the proxy runs on the fleet host, leave `listenAddresses` and the firewall
+line out of step 3 and use `127.0.0.1:8008` here.
+
+## 5. Create the registry directory and rebuild
+
+On the fleet host:
 
 ```sh
 cd /etc/nixos
@@ -131,14 +199,22 @@ sudo nixos-rebuild switch --flake .
 
 The first rebuild builds Hermes and Synapse, which takes a while.
 
-## 5. Check it works
+## 6. Check it works
+
+On the fleet host:
 
 ```sh
 agentctl list                   # "no agents defined"
 sudo agentctl matrix status     # homeserver up, admin @agentfleet:matrix.example.org
 ```
 
-Then confirm federation from outside with the
+From the proxy host, confirm it can reach Synapse over the private network:
+
+```sh
+curl http://10.0.0.2:8008/_matrix/client/versions   # a JSON list of versions
+```
+
+Then confirm the public side with the
 [Matrix Federation Tester](https://federationtester.matrix.org/) by entering
 `matrix.example.org`. It checks DNS, the certificate, the `.well-known`
 document and the federation API in one go and says which one is wrong. Until

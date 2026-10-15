@@ -76,12 +76,13 @@ definition is `sandbox` in `modules/default.nix`.
 ## The Matrix side
 
 Options under `services.agentfleet.matrix`: `serverName` (permanent),
-`operator`, `publicBaseUrl` (default `https://<serverName>`), `listenPort`
-(8008).
+`operator`, `listenAddresses` (default `["127.0.0.1"]`, loopback is always
+included), `listenPort` (8008), `publicBaseUrl` (default
+`https://<serverName>`).
 
 | unit | role |
 |---|---|
-| `matrix-synapse.service` | Synapse on `127.0.0.1:<listenPort>`, Postgres-backed, registration closed |
+| `matrix-synapse.service` | Synapse on `<listenAddresses>:<listenPort>`, plain HTTP, Postgres-backed, registration closed |
 | `agentfleet-matrix-secret.service` | generates the registration shared secret Synapse and the reconciler share |
 | `agentfleet-matrix-db.service` | creates the C-collated Postgres database Synapse insists on |
 | `agentfleet-matrix.service` | the reconciler, run after every activation; agents start after it |

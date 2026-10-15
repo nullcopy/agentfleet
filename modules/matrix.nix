@@ -1,12 +1,13 @@
 # agentfleet — the fleet's Matrix homeserver.
 #
-# Synapse runs on loopback with Postgres; the agents talk to it there. A
-# root-side reconciler, agentfleet-matrix, runs after every activation and
-# gives each agent an account and a fresh access token, sends a one-time
-# introduction DM to the operator, and locks the accounts of removed agents.
-# Only federation with the operator's homeserver needs the host to be
-# reachable from outside (reverse proxy + TLS + .well-known, see
-# docs/install.md).
+# Synapse runs with Postgres, speaking plain HTTP on loopback (for the agents)
+# and optionally on a private address (for a reverse proxy on another
+# machine). A root-side reconciler, agentfleet-matrix, runs after every
+# activation and gives each agent an account and a fresh access token, sends
+# a one-time introduction DM to the operator, and locks the accounts of
+# removed agents. Only federation with the operator's homeserver needs the
+# server to be reachable from outside: TLS, the four routes and .well-known
+# are the reverse proxy's job (see docs/install.md).
 {
   config,
   lib,
@@ -77,7 +78,20 @@ in
     listenPort = mkOption {
       type = types.port;
       default = 8008;
-      description = "Loopback port Synapse listens on; point your reverse proxy here.";
+      description = "Port Synapse listens on (plain HTTP); point your reverse proxy here.";
+    };
+
+    listenAddresses = mkOption {
+      type = types.listOf types.str;
+      default = [ "127.0.0.1" ];
+      example = [ "10.0.0.2" ];
+      description = ''
+        Addresses Synapse listens on. Loopback is always included for the
+        agents and the reconciler. Add the address your reverse proxy reaches
+        this host at when the proxy runs on another machine, and open
+        `listenPort` to that machine only: the listener is unencrypted and
+        exposes the admin API.
+      '';
     };
 
     clientUrl = mkOption {
@@ -145,7 +159,7 @@ in
         listeners = [
           {
             port = m.listenPort;
-            bind_addresses = [ "127.0.0.1" ];
+            bind_addresses = lib.unique ([ "127.0.0.1" ] ++ m.listenAddresses);
             type = "http";
             tls = false;
             x_forwarded = true;
