@@ -150,27 +150,26 @@ whatever software it is:
 
 With [Caddy](https://caddyserver.com/), which handles TLS, `Host` and
 `X-Forwarded-For` by itself and has no body or response limits by default,
-that is this Caddyfile:
+that is this Caddyfile. The domain appears once, on the site line, and the
+`.well-known` bodies take it from the request through the `{host}`
+placeholder; the fleet host's address appears once in `reverse_proxy`:
 
 ```caddyfile
 matrix.example.org {
-    handle /_matrix/* {
-        reverse_proxy 10.0.0.2:8008
-    }
-
-    handle /_synapse/client/* {
+    @synapse path /_matrix/* /_synapse/client/*
+    handle @synapse {
         reverse_proxy 10.0.0.2:8008
     }
 
     handle /.well-known/matrix/server {
         header Content-Type application/json
-        respond `{"m.server": "matrix.example.org:443"}` 200
+        respond `{"m.server": "{host}:443"}` 200
     }
 
     handle /.well-known/matrix/client {
         header Content-Type application/json
         header Access-Control-Allow-Origin *
-        respond `{"m.homeserver": {"base_url": "https://matrix.example.org"}}` 200
+        respond `{"m.homeserver": {"base_url": "https://{host}"}}` 200
     }
 
     handle {
