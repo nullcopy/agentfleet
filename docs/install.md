@@ -109,10 +109,17 @@ services.agentfleet = {
   };
 };
 
-# Let only the proxy host reach Synapse. Use the interface the private
-# network comes in on (`ip addr` shows it; tailscale0, wg0, eth1, ...).
-networking.firewall.interfaces."eth1".allowedTCPPorts = [ 8008 ];  # CHANGE: interface name
+# NixOS blocks inbound connections by default; this opens port 8008, but
+# only on the network interface that carries the private address above, so
+# the proxy host can reach Synapse and the internet cannot.
+networking.firewall.interfaces."eth1".allowedTCPPorts = [ 8008 ];  # CHANGE: interface name, see below
 ```
+
+To find the interface name, run `ip addr` on the fleet host and look for the
+interface that holds the `listenAddresses` address: `tailscale0` or `wg0` for
+a VPN, `eth1` or similar for a second network card. Do not use the plain
+`networking.firewall.allowedTCPPorts` form here: it would open the port on
+every interface.
 
 What each value does:
 
@@ -127,8 +134,7 @@ What each value does:
 | `matrix.listenPort`      | Only if 8008 clashes with something; default 8008.                                                                                                                          |
 
 Synapse speaks plain, unauthenticated HTTP on `listenAddresses`, and that
-listener includes the admin API. Never expose it beyond the proxy host; the
-firewall line above is not optional.
+listener includes the admin API. Never expose it beyond the proxy host.
 
 ## 4. Configure the reverse proxy
 
