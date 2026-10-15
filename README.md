@@ -30,38 +30,89 @@ Removing an agent from the registry and rebuilding removes the user and units.
 
 ## Install
 
-agentfleet is a module for a NixOS host you already run. It assumes you
-administer that host with a flake and apply changes with `nixos-rebuild`
-(or something that behaves like it). If you want an example of a complete
-host flake to hang this off, see [nixos-core](https://github.com/nullcopy/nixos-core).
+agentfleet is added to a NixOS host you already run and administer with a
+flake. The host's flake checkout (for example `/etc/nixos`) becomes the
+source of truth for the fleet: each agent is a small TOML file inside it,
+`agentctl` edits those files and runs `nixos-rebuild` for you, and the NixOS
+module turns them into users and services.
+
+If you want to see a complete host flake that this could be added to, see
+[nixos-core](https://github.com/nullcopy/nixos-core).
+
+### 1. Add the flake input and import the module
+
+In the host's `flake.nix`:
 
 ```nix
-# flake.nix
-inputs.agentfleet.url = "github:nullcopy/agentfleet";
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    agentfleet.url = "github:nullcopy/agentfleet";
+  };
 
-# in your nixosConfigurations.<host>.modules:
-agentfleet.nixosModules.default
+  outputs = { nixpkgs, agentfleet, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        agentfleet.nixosModules.default   # <- this line
+        ./configuration.nix
+      ];
+    };
+  };
+}
 ```
 
+### 2. Tell the module where things live
+
+In `configuration.nix`:
+
 ```nix
-# configuration.nix
 services.agents = {
-  flakeDir = "/etc/nixos";          # where this flake is checked out on the host
-  registry.dir = ./agents;          # one TOML per agent; agentctl manages these
-  # or, without a registry, declare agents inline:
-  agents.reviewer = { harness = "claude-code"; model = "claude-opus-5-5"; };
+  # Where this flake is checked out ON THE HOST. agentctl writes new agent
+  # files here and runs `nixos-rebuild switch --flake <flakeDir>`.
+  flakeDir = "/etc/nixos";
+
+  # The directory of per-agent TOML files, as a Nix path relative to this
+  # file. It must be inside the flake so Nix can read it at build time.
+  registry.dir = ./agents;
 };
-nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 ```
 
-Create the registry directory (even empty, with a `.keep`), `git add` it, and
-rebuild. `agentctl` is installed system-wide by the module.
+Both options describe the same directory from two points of view: Nix needs a
+path it can read at evaluation time (`registry.dir`), and agentctl needs the
+real location on disk to write to (`flakeDir` + `/agents`). If your registry is
+not named `agents`, also set `registry.hostPath`.
 
-Not using `nixos-rebuild` locally? Set `services.agents.rebuildCommand` to
-whatever applies your config; `{action}` is replaced by `switch` or `dry-activate`.
+### 3. Create the registry directory and rebuild
 
-`nixosModules.core` is the same module without the Hermes flake input wired in,
-for people who want to bring their own `harnesses.hermes.package`.
+```sh
+cd /etc/nixos
+mkdir -p agents && touch agents/.keep
+git add agents          # flakes ignore untracked files
+sudo nixos-rebuild switch --flake .
+```
+
+### 4. Check it works
+
+```sh
+agentctl harnesses      # recipes available on this host
+agentctl list           # "no agents defined"
+sudo agentctl add scout --harness claude-code
+```
+
+### Optional
+
+- **Claude Code** is unfree in nixpkgs. To use that harness, add
+  `nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];`
+  to the host configuration.
+- **Agents in Nix instead of TOML.** Skip `registry.dir` and write
+  `services.agents.agents.<name> = { harness = "hermes"; ... };` directly.
+  Both styles can be mixed.
+- **Not applying with `nixos-rebuild` on the host** (colmena, deploy-rs, a
+  wrapper script)? Set `services.agents.rebuildCommand`; `{action}` is replaced
+  with `switch` or `dry-activate`.
+- **Bringing your own Hermes package.** Import `agentfleet.nixosModules.core`
+  instead of `default` and set `services.agents.harnesses.hermes.package`.
 
 ## agentctl
 
