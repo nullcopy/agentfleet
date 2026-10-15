@@ -5,7 +5,7 @@ each with the harness of your choice (Hermes, OpenClaw, Claude Code, or any
 command), declared in Nix and driven day to day by a small CLI.
 
 ```
-$ sudo agentctl add research --harness hermes --model anthropic/claude-sonnet-5-5
+$ sudo agentctl add research --harness hermes --model anthropic/claude-sonnet-5.5
   ANTHROPIC_API_KEY (Anthropic API key) [enter to skip]: ********
   ...
 wrote /etc/nixos/agents/research.toml
@@ -103,6 +103,9 @@ agentctl list           # "no agents defined"
 sudo agentctl add scout --harness claude-code
 ```
 
+For a complete walk-through, from creating a Hermes agent to chatting with it
+in a Matrix room and removing it, see [docs/hermes-matrix.md](docs/hermes-matrix.md).
+
 ### Optional
 
 - **Claude Code** is unfree in nixpkgs. To use that harness, add
@@ -159,7 +162,7 @@ and a name defined in both is an evaluation error.
 ```toml
 harness = "hermes"                   # required: hermes | openclaw | claude-code | custom | yours
 description = "research assistant"
-model = "anthropic/claude-sonnet-5-5"
+model = "anthropic/claude-sonnet-5.5"
 enable = true                        # false: keep the file, deploy nothing
 autostart = true                     # start at boot (service harnesses only)
 packages = ["python3", "nodejs"]     # nixpkgs attribute paths
@@ -255,4 +258,5 @@ modules/default.nix       the services.agentfleet module
 modules/harnesses/        hermes, openclaw, claude-code, custom
 pkgs/agentctl/            the CLI (python, stdlib only)
 checks/                   example host used by `nix flake check`, NixOS VM test
+docs/                     worked examples
 ```

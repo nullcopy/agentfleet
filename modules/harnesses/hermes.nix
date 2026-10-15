@@ -41,6 +41,10 @@ in
         name = "DISCORD_BOT_TOKEN";
         description = "Discord bot token, if the Discord platform is enabled in settings";
       }
+      {
+        name = "MATRIX_ACCESS_TOKEN";
+        description = "Matrix access token for the agent's own account (with MATRIX_HOMESERVER in environment)";
+      }
     ];
 
     environment = ag: {
