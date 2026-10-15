@@ -1,17 +1,9 @@
-# Example: a Hermes agent that messages you on Matrix
+# End-to-end example
 
-End to end: create a Hermes agent, let the fleet's Matrix server give it an
-account, receive its introduction, chat with it, and remove it again.
-
-What you need before starting:
-
-- a host set up as in the README, with `services.agentfleet.matrix` enabled
-  as described in [matrix-server.md](matrix-server.md), and federation
-  working if your own account lives on another homeserver
-- an Anthropic (or OpenRouter / OpenAI) API key
-
-The agent is called `scout`; the host is `obelisk`, the server
-`matrix.arx9.net`, and you are `@nullcopy:4d2.org`.
+Continues from [install](install.md): the host `obelisk` runs agentfleet with
+the Matrix server `matrix.arx9.net`, federation passes the tester, and you are
+`@nullcopy:4d2.org`. We create a Hermes agent called `scout`, receive its
+introduction, chat with it, and remove it again.
 
 ## 1. Create the agent
 

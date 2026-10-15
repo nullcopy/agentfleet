@@ -6,7 +6,7 @@
 # one-time introduction DM to the operator, and locks accounts of removed
 # agents. Agents reach Synapse over 127.0.0.1; only federation with other
 # homeservers needs the host to be reachable from outside, which is left to
-# the admin (reverse proxy + TLS + .well-known, see docs/matrix-server.md).
+# the admin (reverse proxy + TLS + .well-known, see docs/install.md).
 {
   config,
   lib,
