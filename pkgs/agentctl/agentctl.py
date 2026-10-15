@@ -216,7 +216,7 @@ def prompt_secrets(state, provided, no_prompt):
         v = getpass.getpass(f"  {label} [enter to skip]: ")
         if v:
             values[name] = v
-    if not any(k in values for k in (s["name"] for s in state.get("secrets", []))):
+    if not values:
         warn("no model provider key given; the agent will start but cannot answer until you run `agentctl secrets set`")
     return values
 
