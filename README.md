@@ -26,6 +26,8 @@ What you get per agent:
 - a root-owned secrets file at `/var/lib/agents/<name>/secrets.env`, read by systemd
   into the service and into `agentctl shell`/`run`, never readable by the agent's
   user directly and never on a command line
+- optionally an account on the fleet's own Matrix server, with an introduction
+  DM to you when the agent comes up (see [docs/matrix-server.md](docs/matrix-server.md))
 - optional `MemoryMax` / `CPUQuota`
 
 Removing an agent from the registry and rebuilding removes the user and units.
@@ -103,11 +105,15 @@ agentctl list           # "no agents defined"
 sudo agentctl add scout --harness hermes
 ```
 
-For a complete walk-through, from creating a Hermes agent to chatting with it
-in a Matrix room and removing it, see [docs/hermes-matrix.md](docs/hermes-matrix.md).
+For a complete walk-through, from creating a Hermes agent to receiving its
+introduction on Matrix, chatting with it and removing it, see
+[docs/hermes-matrix.md](docs/hermes-matrix.md).
 
 ### Optional
 
+- **A Matrix server for the fleet.** Set `services.agentfleet.matrix` as in
+  [docs/matrix-server.md](docs/matrix-server.md); every Hermes agent then gets
+  a Matrix account and introduces itself to you.
 - **Agents in Nix instead of TOML.** Skip `registry.dir` and write
   `services.agentfleet.agents.<name> = { harness = "hermes"; ... };` directly.
   Both styles can be mixed.
@@ -130,6 +136,7 @@ agentctl logs <name> [-f] [-n N]
 agentctl shell <name>              sandboxed login shell as the agent, secrets loaded
 agentctl run <name> -- <cmd...>    one sandboxed command as the agent, in its home
 agentctl secrets set|edit|list <name>
+agentctl matrix [status|introduce|rotate-token|deactivate|register-user]
 ```
 
 `agentctl add` options worth knowing: `--set key=value` writes harness settings
@@ -166,6 +173,11 @@ packages = ["python3", "nodejs"]     # nixpkgs attribute paths
 memory_max = "4G"
 cpu_quota = "200%"
 secrets_file = "/run/secrets/research.env"   # e.g. sops-nix; default is under /var/lib/agents
+
+[matrix]                             # only with services.agentfleet.matrix.enable
+enable = true
+localpart = "research"
+allowed_users = ["@friend:example.org"]
 
 [environment]
 TZ = "UTC"
@@ -252,8 +264,10 @@ nix build .#checks.x86_64-linux.vm
 ```
 flake.nix                 nixosModules.{default,core}, packages.agentctl, checks
 modules/default.nix       the services.agentfleet module
+modules/matrix.nix        the fleet's Matrix server (Synapse + reconciler)
 modules/harnesses/        hermes
 pkgs/agentctl/            the CLI (python, stdlib only)
+pkgs/agentfleet-matrix/   the Matrix reconciler (python, stdlib only)
 checks/                   example host used by `nix flake check`, NixOS VM test
-docs/                     worked examples
+docs/                     Matrix server guide, worked example
 ```

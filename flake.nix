@@ -50,11 +50,15 @@
       packages = forAll (
         system: pkgs: rec {
           agentctl = pkgs.callPackage ./pkgs/agentctl { };
+          agentfleet-matrix = pkgs.callPackage ./pkgs/agentfleet-matrix { };
           default = agentctl;
         }
       );
 
-      overlays.default = final: _prev: { agentctl = final.callPackage ./pkgs/agentctl { }; };
+      overlays.default = final: _prev: {
+        agentctl = final.callPackage ./pkgs/agentctl { };
+        agentfleet-matrix = final.callPackage ./pkgs/agentfleet-matrix { };
+      };
 
       checks = forAll (
         system: pkgs:
@@ -101,6 +105,7 @@
             )
           );
           agentctl = self.packages.${system}.agentctl;
+          agentfleet-matrix = self.packages.${system}.agentfleet-matrix;
           vm = import ./checks/vm-test.nix { inherit pkgs self; };
         }
       );

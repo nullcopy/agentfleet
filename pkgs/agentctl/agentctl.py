@@ -294,6 +294,8 @@ def render_agent_toml(args):
         top["packages"] = args.package
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
+    if args.no_matrix:
+        toml_tables({"enable": False}, "matrix", out)
     env = parse_kv(args.env, "--env")
     if env:
         toml_tables(env, "environment", out)
@@ -336,12 +338,13 @@ def cmd_list(state, args):
             st = unit_state(a["service"])
         else:
             st = "on-demand"
-        rows.append((name, a["harness"], a.get("source", "nix"), st, a.get("user", ""), a.get("description", "")))
+        mxid = (a.get("matrix") or {}).get("userId") or "-"
+        rows.append((name, a["harness"], a.get("source", "nix"), st, a.get("user", ""), mxid, a.get("description", "")))
     if not rows:
         print("no agents defined")
         return
-    hdr = ("NAME", "HARNESS", "SOURCE", "STATE", "USER", "DESCRIPTION")
-    widths = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(5)]
+    hdr = ("NAME", "HARNESS", "SOURCE", "STATE", "USER", "MATRIX", "DESCRIPTION")
+    widths = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(6)]
     fmt = "  ".join(f"{{:<{w}}}" for w in widths) + "  {}"
     print(fmt.format(*hdr))
     for r in rows:
@@ -447,6 +450,10 @@ def cmd_rm(state, args):
             if p and os.path.isdir(p):
                 shutil.rmtree(p)
                 print(f"purged {p}")
+        ctl = (state.get("matrix") or {}).get("ctl")
+        if ctl and (a.get("matrix") or {}).get("enable") and not args.no_rebuild:
+            # The rebuild above locked the account; purge deactivates it for good.
+            run([ctl, "deactivate", args.name], check=False)
     elif os.path.isdir(a.get("home") or ""):
         warn(
             f"{a['home']} was kept. Its files still belong to the freed UID, which a "
@@ -525,9 +532,9 @@ def exec_as_agent(name, a, argv):
         f"--gid={a['group']}",
         f"--working-directory={a['home']}",
         "--expand-environment=no",
-        "-p",
-        f"EnvironmentFile={a['secretsFile']}",
     ]
+    for f in a.get("envFiles") or [a["secretsFile"]]:
+        cmd += ["-p", f"EnvironmentFile={f}"]
     for prop in a.get("sandbox", []):
         cmd += ["-p", prop]
     for k, v in agent_environ(a).items():
@@ -546,6 +553,14 @@ def cmd_run(state, args):
     if not args.cmd:
         die("usage: agentctl run <name> -- <command...>")
     exec_as_agent(args.name, a, args.cmd)
+
+
+def cmd_matrix(state, args):
+    need_root()
+    ctl = (state.get("matrix") or {}).get("ctl")
+    if not ctl:
+        die("the built-in Matrix server is off on this host (services.agentfleet.matrix.enable)")
+    os.execvp(ctl, [ctl, *args.args])
 
 
 def cmd_secrets(state, args):
@@ -614,6 +629,7 @@ def build_parser():
     s.add_argument("--set", action="append", metavar="KEY=VAL", help="harness setting, dotted keys allowed, e.g. gateway.port=18790; integers and true/false become TOML literals (repeatable)")
     s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
     s.add_argument("--secret", action="append", metavar="K=V", help="set a secret now instead of being prompted (repeatable)")
+    s.add_argument("--no-matrix", action="store_true", help="do not give the agent an account on the fleet's Matrix server")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
     s.add_argument("--no-rebuild", action="store_true", help="write the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_add)
@@ -649,6 +665,10 @@ def build_parser():
     s.add_argument("cmd", nargs=argparse.REMAINDER)
     s.set_defaults(func=cmd_run)
 
+    s = sub.add_parser("matrix", help="fleet Matrix server: status | introduce <name> | rotate-token <name> | deactivate <name> | register-user <localpart>")
+    s.add_argument("args", nargs=argparse.REMAINDER)
+    s.set_defaults(func=cmd_matrix)
+
     s = sub.add_parser("secrets", help="manage the agent's secrets file")
     ss = s.add_subparsers(dest="sub", metavar="<set|edit|list>")
     ss.required = True
@@ -667,6 +687,8 @@ def main():
     args = build_parser().parse_args()
     if args.command == "run" and args.cmd and args.cmd[0] == "--":
         args.cmd = args.cmd[1:]
+    if args.command == "matrix" and not args.args:
+        args.args = ["status"]
     state = load_state()
     args.func(state, args)
 

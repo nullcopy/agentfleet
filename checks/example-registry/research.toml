@@ -1,6 +1,6 @@
 # One agent per file. Keys are snake_case; see README "Registry format".
 harness = "hermes"
-model = "anthropic/claude-sonnet-5-5"
+model = "anthropic/claude-sonnet-5.5"
 description = "long-running research assistant on Telegram"
 autostart = true
 memory_max = "4G"

@@ -10,9 +10,17 @@
     fsType = "tmpfs";
   };
 
+  networking.hostName = "example";
+
   services.agentfleet = {
     registry.dir = ./example-registry;
     flakeDir = "/etc/nixos";
+
+    matrix = {
+      enable = true;
+      serverName = "matrix.example.org";
+      operator = "@me:example.org";
+    };
 
     # A minimal harness defined on the host itself: any command as a service.
     harnesses.custom = {
@@ -31,6 +39,13 @@
       harness = "hermes";
       model = "anthropic/claude-sonnet-5.5";
       description = "second Hermes agent";
+      matrix.localpart = "scribe2";
+      matrix.allowedUsers = [ "@friend:example.org" ];
+    };
+
+    agents.quiet = {
+      harness = "hermes";
+      matrix.enable = false;
     };
 
     agents.parked = {

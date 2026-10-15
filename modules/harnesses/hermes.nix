@@ -43,13 +43,24 @@ in
       }
       {
         name = "MATRIX_ACCESS_TOKEN";
-        description = "Matrix access token for the agent's own account (with MATRIX_HOMESERVER in environment)";
+        description = "Matrix access token; only needed without the built-in Matrix server (set MATRIX_HOMESERVER in environment too)";
       }
     ];
 
-    environment = ag: {
-      HERMES_HOME = "${ag.home}/.hermes";
-    };
+    # Hermes reads the MATRIX_* variables the Matrix server provisions as is.
+    supportsMatrix = true;
+
+    environment =
+      ag:
+      {
+        HERMES_HOME = "${ag.home}/.hermes";
+      }
+      // lib.optionalAttrs ag.matrix.enable {
+        # Element encrypts DMs it creates; optional mode joins them when the
+        # crypto libraries (bundled in the Nix build) initialise, and keeps
+        # unencrypted rooms working otherwise.
+        MATRIX_E2EE_MODE = "optional";
+      };
 
     # Same argv the upstream NixOS module uses for its gateway unit.
     exec = ag: "${lib.getExe' h.package "hermes"} gateway";

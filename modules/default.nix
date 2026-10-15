@@ -22,6 +22,7 @@
 
 let
   cfg = config.services.agentfleet;
+  mx = cfg.matrix;
 
   inherit (lib)
     mkOption
@@ -65,6 +66,13 @@ let
     settings = "settings";
     description = "description";
     secrets_file = "secretsFile";
+    matrix = "matrix";
+  };
+  matrixKeyMap = {
+    enable = "enable";
+    localpart = "localpart";
+    allowed_users = "allowedUsers";
+    introduce = "introduce";
   };
 
   tomlFiles =
@@ -73,14 +81,20 @@ let
     else
       filterAttrs (n: t: t == "regular" && hasSuffix ".toml" n) (builtins.readDir cfg.registry.dir);
 
-  fromToml =
-    fname: t:
+  mapKeys =
+    keyMap: what: fname: t:
     mapAttrs' (
       k: v:
-      nameValuePair (tomlKeyMap.${k}
-        or (throw "agentfleet: unknown key '${k}' in registry file ${fname} (known: ${concatStringsSep ", " (attrNames tomlKeyMap)})")
+      nameValuePair (keyMap.${k}
+        or (throw "agentfleet: unknown ${what} key '${k}' in registry file ${fname} (known: ${concatStringsSep ", " (attrNames keyMap)})")
       ) v
     ) t;
+
+  fromToml =
+    fname: t:
+    mapAttrs (k: v: if k == "matrix" then mapKeys matrixKeyMap "[matrix]" fname v else v) (
+      mapKeys tomlKeyMap "" fname t
+    );
 
   tomlAgents = mapAttrs' (
     fname: _:
@@ -211,13 +225,45 @@ let
         default = _: "";
         description = "agent -> lines appended to the agent's seeded .bashrc.";
       };
+      supportsMatrix = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          The harness reads MATRIX_HOMESERVER, MATRIX_USER_ID, MATRIX_ALLOWED_USERS,
+          MATRIX_ACCESS_TOKEN and MATRIX_DEVICE_ID from its environment, so the
+          built-in Matrix server can provision accounts for its agents.
+        '';
+      };
     };
   };
 
   agentModule =
-    { name, ... }:
+    { name, config, ... }:
     {
       options = {
+        matrix = {
+          enable = mkOption {
+            type = types.bool;
+            default = mx.enable && (cfg.harnesses.${config.harness}.supportsMatrix or false);
+            defaultText = lib.literalExpression "services.agentfleet.matrix.enable && <harness supports Matrix>";
+            description = "Give this agent an account on the fleet's Matrix server.";
+          };
+          localpart = mkOption {
+            type = types.str;
+            default = name;
+            description = "User id local part: @<localpart>:<serverName>. Change it if the old id was deactivated.";
+          };
+          allowedUsers = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            description = "Matrix users allowed to talk to this agent, in addition to the operator.";
+          };
+          introduce = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Send the operator a DM introducing this agent once its account exists.";
+          };
+        };
         harness = mkOption {
           type = types.str;
           description = "Name of a harness under services.agentfleet.harnesses.";
@@ -312,8 +358,22 @@ let
       hc = cfg.harnesses.${a.harness};
       user = "${cfg.userPrefix}${name}";
       home = "${cfg.homeBase}/${name}";
+      matrix = {
+        inherit (a.matrix) enable localpart introduce;
+        userId = if a.matrix.enable then "@${a.matrix.localpart}:${mx.serverName}" else null;
+        homeserver = if a.matrix.enable then mx.clientUrl else null;
+        allowedUsers = lib.unique (
+          optional (mx.operator != null) mx.operator ++ mx.extraAllowedUsers ++ a.matrix.allowedUsers
+        );
+        envFile = "${cfg.stateDir}/${name}/matrix.env";
+      };
       self = {
-        inherit name user home;
+        inherit
+          name
+          user
+          home
+          matrix
+          ;
         group = user;
         inherit (a)
           harness
@@ -338,8 +398,16 @@ let
           AGENT_NAME = name;
           AGENT_HARNESS = a.harness;
         }
+        // optionalAttrs matrix.enable {
+          MATRIX_HOMESERVER = matrix.homeserver;
+          MATRIX_USER_ID = matrix.userId;
+          MATRIX_ALLOWED_USERS = concatStringsSep "," matrix.allowedUsers;
+        }
         // hc.environment self
         // a.environment;
+        # The user-managed secrets file, then the token file the Matrix
+        # reconciler writes (later files win).
+        envFiles = [ a.secretsFile ] ++ optional matrix.enable matrix.envFile;
         exec = hc.exec self;
       };
     in
@@ -510,11 +578,15 @@ let
       toString v;
   sandboxProps = ag: mapAttrsToList (k: v: "${k}=${unitValue v}") (sandboxOf ag);
 
+  # Matrix-enabled agents start after their account and token exist.
+  matrixUnit = ag: optional ag.matrix.enable "agentfleet-matrix.service";
+
   initService = ag: {
     description = "agentfleet: first-run initialisation for agent ${ag.name}";
     wantedBy = [ "multi-user.target" ];
     wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    after = [ "network-online.target" ] ++ matrixUnit ag;
+    requires = matrixUnit ag;
     unitConfig.ConditionPathExists = "!${ag.home}/.agentfleet/initialized";
     path = ag.packages;
     environment = ag.envVars;
@@ -524,7 +596,7 @@ let
       User = ag.user;
       Group = ag.group;
       WorkingDirectory = ag.home;
-      EnvironmentFile = ag.secretsFile;
+      EnvironmentFile = ag.envFiles;
     }
     // sandboxOf ag;
     script = ''
@@ -538,12 +610,13 @@ let
   mainService = ag: {
     description = "agentfleet: agent ${ag.name} (${ag.harness})";
     wantedBy = optional ag.autostart "multi-user.target";
-    requires = [ "${ag.initServiceName}.service" ];
+    requires = [ "${ag.initServiceName}.service" ] ++ matrixUnit ag;
     wants = [ "network-online.target" ];
     after = [
       "${ag.initServiceName}.service"
       "network-online.target"
-    ];
+    ]
+    ++ matrixUnit ag;
     path = ag.packages;
     environment = ag.envVars;
     serviceConfig = mkMerge [
@@ -553,7 +626,7 @@ let
           Group = ag.group;
           WorkingDirectory = ag.home;
           ExecStart = ag.exec;
-          EnvironmentFile = ag.secretsFile;
+          EnvironmentFile = ag.envFiles;
           Restart = "on-failure";
           RestartSec = 5;
         }
@@ -581,6 +654,10 @@ let
       hostPath = cfg.registry.hostPath;
       enabled = cfg.registry.dir != null;
     };
+    matrix = {
+      enabled = mx.enable;
+      ctl = if mx.enable then "${mx.package}/bin/agentfleet-matrix" else null;
+    };
     harnesses = mapAttrs (_: h: {
       inherit (h) description secrets;
     }) cfg.harnesses;
@@ -602,9 +679,13 @@ let
         service = if ag.exec != null then "${ag.serviceName}.service" else null;
         initService = "${ag.initServiceName}.service";
         env = ag.envVars;
+        envFiles = ag.envFiles;
         path = "${profileOf ag}/bin";
         shell = "${pkgs.bashInteractive}/bin/bash";
         sandbox = sandboxProps ag;
+        matrix = {
+          inherit (ag.matrix) enable userId;
+        };
       }) agents
       // mapAttrs (name: a: {
         enabled = false;
@@ -731,12 +812,35 @@ in
       default = true;
       description = "Put agentctl in environment.systemPackages.";
     };
+
+    resolvedAgents = mkOption {
+      type = types.attrs;
+      default = { };
+      internal = true;
+      description = "Enabled agents after resolution, for sibling modules (matrix.nix).";
+    };
   };
+
+  imports = [ ./matrix.nix ];
 
   config = mkMerge [
     { services.agentfleet.registry.agents = tomlAgents; }
 
     (mkIf cfg.enable {
+      services.agentfleet.resolvedAgents = mapAttrs (_: ag: {
+        inherit (ag)
+          name
+          user
+          home
+          stateDir
+          harness
+          model
+          description
+          matrix
+          ;
+        service = if ag.exec != null then "${ag.serviceName}.service" else null;
+      }) agents;
+
       assertions =
         (mapAttrsToList (name: a: {
           assertion = builtins.match nameRegex name != null;
@@ -749,6 +853,14 @@ in
         ++ (mapAttrsToList (name: a: {
           assertion = cfg.harnesses ? ${a.harness};
           message = "agentfleet: agent '${name}' uses unknown harness '${a.harness}' (available: ${concatStringsSep ", " (attrNames cfg.harnesses)})";
+        }) allAgents)
+        ++ (mapAttrsToList (name: a: {
+          assertion = !a.matrix.enable || mx.enable;
+          message = "agentfleet: agent '${name}' has matrix.enable but services.agentfleet.matrix.enable is off";
+        }) allAgents)
+        ++ (mapAttrsToList (name: a: {
+          assertion = !a.matrix.enable || builtins.match "[a-z0-9._=/+-]+" a.matrix.localpart != null;
+          message = "agentfleet: agent '${name}': matrix.localpart '${a.matrix.localpart}' is not a valid Matrix localpart";
         }) allAgents)
         ++ [
           {

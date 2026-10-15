@@ -1,4 +1,5 @@
-# NixOS VM test. Uses an inline test harness so Hermes is not built.
+# NixOS VM test. Uses an inline test harness so Hermes is not built, and the
+# built-in Matrix server with a local operator account.
 # Run with: nix build .#checks.x86_64-linux.vm   (needs KVM)
 { pkgs, self }:
 
@@ -9,6 +10,11 @@ pkgs.testers.runNixOSTest {
     { pkgs, ... }:
     {
       imports = [ self.nixosModules.core ];
+      virtualisation.memorySize = 2048;
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.jq
+      ];
 
       services.agentfleet = {
         flakeDir = "/root/flake";
@@ -16,10 +22,18 @@ pkgs.testers.runNixOSTest {
         registry.dir = ./vm-registry;
         registry.hostPath = "/root/flake/agents";
 
+        matrix = {
+          enable = true;
+          serverName = "localhost";
+          publicBaseUrl = "http://localhost:8008";
+          operator = "@op:localhost";
+        };
+
         harnesses.custom = {
           description = "test harness";
           exec = ag: ag.settings.exec or null;
           init = ag: ag.settings.init or "";
+          supportsMatrix = true;
         };
 
         agents.sleeper = {
@@ -33,6 +47,7 @@ pkgs.testers.runNixOSTest {
           harness = "custom";
           description = "on-demand";
           packages = [ pkgs.util-linux ];
+          matrix.enable = false;
         };
       };
     };
@@ -89,5 +104,42 @@ pkgs.testers.runNixOSTest {
     assert "would-run nixos-rebuild switch" in out
     machine.fail("test -e /root/flake/agents/demo.toml")
     machine.fail("agentctl rm sleeper --yes")  # defined in Nix, not removable
+
+    # ---- Matrix server ----
+    machine.wait_for_unit("matrix-synapse.service")
+    machine.wait_for_unit("agentfleet-matrix.service")
+    assert machine.succeed("stat -c %U:%a /var/lib/agents/sleeper/matrix.env").strip() == "root:400"
+    machine.fail("test -e /var/lib/agents/tool/matrix.env")
+    assert state["agents"]["sleeper"]["matrix"]["userId"] == "@sleeper:localhost"
+    assert machine.succeed("agentctl run sleeper -- sh -c 'echo $MATRIX_USER_ID:$MATRIX_ALLOWED_USERS'").strip() == "@sleeper:localhost:@op:localhost"
+    machine.succeed("agentctl run sleeper -- sh -c 'test -n \"$MATRIX_ACCESS_TOKEN\" && test \"$MATRIX_DEVICE_ID\" = AGENTFLEET'")
+    out = machine.succeed("agentctl matrix status")
+    assert "@sleeper:localhost" in out and "active" in out, out
+    assert "@sleeper:localhost" in machine.succeed("agentctl list")
+
+    # the agent's token works against the homeserver
+    tok = machine.succeed("awk -F'\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
+    who = json.loads(machine.succeed(f"curl -sf -H 'Authorization: Bearer {tok}' http://127.0.0.1:8008/_matrix/client/v3/account/whoami"))
+    assert who["user_id"] == "@sleeper:localhost" and who["device_id"] == "AGENTFLEET", who
+
+    # the operator did not exist at boot, so the introduction is retried on demand
+    op = json.loads(machine.succeed("agentctl matrix register-user op"))
+    machine.succeed("agentctl matrix introduce sleeper")
+    sync = json.loads(machine.succeed(f"curl -sf -H 'Authorization: Bearer {op['access_token']}' 'http://127.0.0.1:8008/_matrix/client/v3/sync?timeout=0'"))
+    invites = sync.get("rooms", {}).get("invite", {})
+    assert len(invites) == 1, invites
+    room = next(iter(invites))
+    machine.succeed(f"curl -sf -X POST -H 'Authorization: Bearer {op['access_token']}' -d '{{}}' http://127.0.0.1:8008/_matrix/client/v3/join/{room}")
+    msgs = json.loads(machine.succeed(f"curl -sf -H 'Authorization: Bearer {op['access_token']}' 'http://127.0.0.1:8008/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=10'"))
+    bodies = [e["content"].get("body", "") for e in msgs["chunk"] if e["type"] == "m.room.message"]
+    assert any("I'm sleeper" in b for b in bodies), bodies
+
+    # reconcile is idempotent: same token, no restart
+    machine.succeed("systemctl restart agentfleet-matrix.service")
+    assert tok == machine.succeed("awk -F'\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
+    machine.succeed("agentctl matrix rotate-token sleeper")
+    assert tok != machine.succeed("awk -F'\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
+    machine.fail(f"curl -sf -H 'Authorization: Bearer {tok}' http://127.0.0.1:8008/_matrix/client/v3/account/whoami")
+    machine.fail("agentctl matrix deactivate sleeper")  # still declared
   '';
 }
