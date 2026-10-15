@@ -31,18 +31,10 @@ Removing an agent from the registry and rebuilding removes the user and units.
 
 ## Install
 
-### Fresh host
-
-```sh
-sudo mkdir -p /etc/nixos && cd /etc/nixos
-sudo nix flake init -t github:nullcopy/agentfleet
-sudo nixos-generate-config --show-hardware-config | sudo tee hardware-configuration.nix
-# edit configuration.nix: hostname, your SSH key; rename agenthost in flake.nix
-sudo git init && sudo git add -A
-sudo nixos-rebuild switch --flake /etc/nixos
-```
-
-### Existing NixOS flake
+agentfleet is a module for a NixOS host you already run. It assumes you
+administer that host with a flake and apply changes with `nixos-rebuild`
+(or something that behaves like it). If you want an example of a complete
+host flake to hang this off, see [nixos-core](https://github.com/nullcopy/nixos-core).
 
 ```nix
 # flake.nix
@@ -61,10 +53,11 @@ services.agents = {
   agents.reviewer = { harness = "claude-code"; model = "claude-opus-5-5"; };
 };
 networking.firewall.enable = true;  # needed only for egress policies
+nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
 ```
 
-Then `git add agents/` (create it, even empty, with a `.keep`) and rebuild.
-`agentctl` is installed system-wide by the module.
+Create the registry directory (even empty, with a `.keep`), `git add` it, and
+rebuild. `agentctl` is installed system-wide by the module.
 
 Not using `nixos-rebuild` locally? Set `services.agents.rebuildCommand` to
 whatever applies your config; `{action}` is replaced by `switch` or `dry-activate`.
@@ -195,10 +188,9 @@ nix build .#checks.x86_64-linux.vm
 ## Layout
 
 ```
-flake.nix                 nixosModules.{default,core}, packages.agentctl, templates, checks
+flake.nix                 nixosModules.{default,core}, packages.agentctl, checks
 modules/default.nix       the services.agents module
 modules/harnesses/        hermes, openclaw, claude-code, custom
 pkgs/agentctl/            the CLI (python, stdlib only)
-templates/fresh-host/     starter flake for a new machine
 checks/                   example host used by `nix flake check`, NixOS VM test
 ```

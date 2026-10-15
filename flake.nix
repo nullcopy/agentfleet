@@ -56,14 +56,6 @@
 
       overlays.default = final: _prev: { agentctl = final.callPackage ./pkgs/agentctl { }; };
 
-      templates = rec {
-        fresh-host = {
-          path = ./templates/fresh-host;
-          description = "A new NixOS host whose only job is running agents";
-        };
-        default = fresh-host;
-      };
-
       checks = forAll (
         system: pkgs:
         let
