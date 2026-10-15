@@ -1,8 +1,8 @@
 # End-to-end example
 
-Continues from [install](install.md): the host `obelisk` runs agentfleet with
-the Matrix server `matrix.arx9.net`, federation passes the tester, and you are
-`@nullcopy:4d2.org`. We create a Hermes agent called `scout`, receive its
+Continues from [install](install.md): the host `myhost` runs agentfleet with
+the Matrix server `matrix.example.org`, federation passes the tester, and you are
+`@alice:example.com`. We create a Hermes agent called `scout`, receive its
 introduction, chat with it, and remove it again.
 
 ## 1. Create the agent
@@ -27,33 +27,33 @@ agent 'scout' is up. Next: agentctl status scout | agentctl shell scout
 Leave `MATRIX_ACCESS_TOKEN` empty: the Matrix server provisions it. The first
 `add` of a Hermes agent builds Hermes, which takes a while.
 
-During the rebuild the reconciler created `@scout:matrix.arx9.net`, wrote its
+During the rebuild the reconciler created `@scout:matrix.example.org`, wrote its
 token where only root and the agent's units can read it, and started Hermes
 after that:
 
 ```
 $ agentctl list
 NAME   HARNESS  SOURCE  STATE   USER         MATRIX                   DESCRIPTION
-scout  hermes   toml    active  agent-scout  @scout:matrix.arx9.net   research assistant
+scout  hermes   toml    active  agent-scout  @scout:matrix.example.org   research assistant
 
 $ agentctl matrix status
-homeserver http://127.0.0.1:8008 (matrix.arx9.net): up
-admin: @agentfleet:matrix.arx9.net
-operator: @nullcopy:4d2.org
+homeserver http://127.0.0.1:8008 (matrix.example.org): up
+admin: @agentfleet:matrix.example.org
+operator: @alice:example.com
 AGENT   USER                      STATE    INTRODUCED
-scout   @scout:matrix.arx9.net    active   !kGh...:matrix.arx9.net
+scout   @scout:matrix.example.org    active   !kGh...:matrix.example.org
 
 $ agentctl logs scout -n 20
-... Matrix: logged in as @scout:matrix.arx9.net
+... Matrix: logged in as @scout:matrix.example.org
 ... Matrix: initial sync complete, joined 1 rooms
 ```
 
 ## 2. The agent says hello
 
-In your Matrix client there is a new invite from `@scout:matrix.arx9.net`.
+In your Matrix client there is a new invite from `@scout:matrix.example.org`.
 Accept it. The room contains one message:
 
-> Hello! I'm **scout**, a hermes agent running on `obelisk`
+> Hello! I'm **scout**, a hermes agent running on `myhost`
 > (anthropic/claude-sonnet-5.5). Research assistant. This room is our direct
 > line: message me here any time. In other rooms, invite me and mention
 > `@scout` to get my attention.
@@ -67,7 +67,7 @@ Hermes treats the two-person room as a DM and answers every message without
 being mentioned. You are in its allow list because you are the operator.
 
 **A room with several people, or several agents.** Create a room, invite
-`@scout:matrix.arx9.net` (it accepts invites from allowed users), and mention
+`@scout:matrix.example.org` (it accepts invites from allowed users), and mention
 it when you want it:
 
 > @scout: what is the capital of Mongolia, and what time is it there now?
@@ -78,7 +78,7 @@ rebuild:
 ```toml
 # /etc/nixos/agents/scout.toml
 [environment]
-MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.arx9.net"
+MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.example.org"
 ```
 
 ```sh
@@ -107,10 +107,10 @@ $ sudo agentctl rm scout --purge
 Remove agent 'scout' and PURGE its home, state and secrets? [y/N] y
 removed /etc/nixos/agents/scout.toml
 ==> nixos-rebuild switch --flake /etc/nixos
-agentfleet-matrix: scout: agent gone, locked @scout:matrix.arx9.net and logged out its devices
+agentfleet-matrix: scout: agent gone, locked @scout:matrix.example.org and logged out its devices
 purged /srv/agents/scout
 purged /var/lib/agents/scout
-agentfleet-matrix: deactivated @scout:matrix.arx9.net (this id can never be registered again)
+agentfleet-matrix: deactivated @scout:matrix.example.org (this id can never be registered again)
 agent 'scout' removed
 ```
 

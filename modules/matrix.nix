@@ -67,10 +67,10 @@ in
 
     serverName = mkOption {
       type = types.str;
-      example = "matrix.arx9.net";
+      example = "matrix.example.org";
       description = ''
         The Matrix server name: the part after the colon in every user id
-        (`@scout:matrix.arx9.net`). It is baked into the database and cannot be
+        (`@scout:matrix.example.org`). It is baked into the database and cannot be
         changed later without starting over.
       '';
     };
@@ -85,7 +85,7 @@ in
     operator = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "@nullcopy:4d2.org";
+      example = "@alice:example.com";
       description = ''
         Your own Matrix user. Every agent allows this user to talk to it and
         sends it an introduction DM once provisioned. Can be on any homeserver

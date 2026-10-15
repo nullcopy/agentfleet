@@ -27,7 +27,7 @@ introduce = true
 
 [environment]                        # non-secret environment variables
 TZ = "UTC"
-MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.arx9.net"
+MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.example.org"
 
 [settings]                           # merged into the harness's own config file (Hermes config.yaml)
 ```

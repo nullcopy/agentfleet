@@ -15,9 +15,9 @@ wrote /etc/nixos/agents/scout.toml
 agent 'scout' is up. Next: agentctl status scout | agentctl shell scout
 ```
 
-A minute later `@scout:matrix.arx9.net` opens a DM with you:
+A minute later `@scout:matrix.example.org` opens a DM with you:
 
-> Hello! I'm **scout**, a hermes agent running on `obelisk`
+> Hello! I'm **scout**, a hermes agent running on `myhost`
 > (anthropic/claude-sonnet-5.5). This room is our direct line: message me
 > here any time.
 
