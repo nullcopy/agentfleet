@@ -682,8 +682,8 @@ in
       default = "nixos-rebuild {action} --flake ${cfg.flakeDir}";
       defaultText = lib.literalExpression ''"nixos-rebuild {action} --flake ''${services.agentfleet.flakeDir}"'';
       description = ''
-        Command agentctl runs to apply the registry. `{action}` is replaced by
-        `switch` or `dry-activate`. Change it for colmena, deploy-rs, or a
+        Command `agentctl add`/`rm` run after changing the registry. `{action}`
+        is replaced by `switch`. Change it for colmena, deploy-rs, or a
         non-flake configuration.
       '';
     };

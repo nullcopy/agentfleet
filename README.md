@@ -111,9 +111,9 @@ sudo agentctl add scout --harness claude-code
 - **Agents in Nix instead of TOML.** Skip `registry.dir` and write
   `services.agentfleet.agents.<name> = { harness = "hermes"; ... };` directly.
   Both styles can be mixed.
-- **Not applying with `nixos-rebuild` on the host** (colmena, deploy-rs, a
-  wrapper script)? Set `services.agentfleet.rebuildCommand`; `{action}` is replaced
-  with `switch` or `dry-activate`.
+- **Not rebuilding with `nixos-rebuild` on the host** (colmena, deploy-rs, a
+  wrapper script)? Set `services.agentfleet.rebuildCommand` to what
+  `agentctl add`/`rm` should run; `{action}` is replaced with `switch`.
 - **Bringing your own Hermes package.** Import `agentfleet.nixosModules.core`
   instead of `default` and set `services.agentfleet.harnesses.hermes.package`.
 
@@ -124,7 +124,6 @@ agentctl list                      agents, harness, source, service state
 agentctl harnesses                 recipes and the secrets they understand
 agentctl add <name> --harness H    register + store secrets + rebuild
 agentctl rm <name> [--purge]       unregister + rebuild [+ delete home/state]
-agentctl apply [--dry-run]         rebuild from the current registry
 agentctl start|stop|restart <name>
 agentctl status [name]
 agentctl logs <name> [-f] [-n N]
@@ -137,7 +136,10 @@ agentctl secrets set|edit|list <name>
 (dotted keys allowed, e.g. `--set gateway.port=18790`; integers and
 `true`/`false` become TOML literals, `--set-str` keeps a string), `--env K=V`
 adds non-secret environment, `--package` adds nixpkgs packages to PATH, and
-`--no-apply` writes the registry entry without rebuilding.
+`--no-rebuild` writes the registry entry without rebuilding; a plain
+`nixos-rebuild switch` later picks it up, as it does for any hand-written or
+hand-edited entry. There is no separate "apply" step: the registry is part of
+your system configuration and is deployed, updated and rolled back with it.
 
 `shell` and `run` start a transient systemd service as the agent's user
 (`systemd-run --uid ... --pty`) carrying the same sandbox properties as the

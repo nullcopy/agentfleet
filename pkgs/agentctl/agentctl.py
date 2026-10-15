@@ -292,7 +292,7 @@ def render_agent_toml(args):
         top["cpu_quota"] = args.cpu_quota
     if args.package:
         top["packages"] = args.package
-    out = [f"# agent '{args.name}' - created by agentctl; edit freely, then `agentctl apply`."]
+    out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
     env = parse_kv(args.env, "--env")
     if env:
@@ -309,11 +309,14 @@ def render_agent_toml(args):
 
 
 # ----------------------------------------------------------------------------
-# apply
+# rebuild (plain nixos-rebuild switch by default; agentctl adds nothing to it)
 # ----------------------------------------------------------------------------
-def apply(state, dry_run=False):
-    action = "dry-activate" if dry_run else "switch"
-    cmd = state["rebuildCommand"].replace("{action}", action)
+def rebuild_cmd(state):
+    return state["rebuildCommand"].replace("{action}", "switch")
+
+
+def rebuild(state):
+    cmd = rebuild_cmd(state)
     print(f"==> {cmd}")
     r = subprocess.run(cmd, shell=True)
     if r.returncode != 0:
@@ -373,7 +376,7 @@ def cmd_add(state, args):
     reg = state["registry"]["hostPath"]
     path = os.path.join(reg, f"{name}.toml")
     if os.path.exists(path):
-        die(f"{path} already exists (run `agentctl apply` to deploy it)")
+        die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
 
     secrets = prompt_secrets(
         state["harnesses"][args.harness], parse_kv(args.secret, "--secret"), args.no_prompt
@@ -395,10 +398,10 @@ def cmd_add(state, args):
         write_env_file(secrets_path, secrets)
         print(f"wrote {len(secrets)} secret(s) to {secrets_path}")
 
-    if args.no_apply:
-        print("skipping rebuild (--no-apply); run `agentctl apply` when ready")
+    if args.no_rebuild:
+        print(f"skipping rebuild (--no-rebuild); run `{rebuild_cmd(state)}` when ready")
         return
-    apply(state)
+    rebuild(state)
     print(f"agent '{name}' is up. Next: agentctl status {name} | agentctl shell {name}")
 
 
@@ -409,7 +412,7 @@ def cmd_rm(state, args):
     if a is None:
         if not os.path.exists(path):
             die(f"no agent named '{args.name}' (see `agentctl list`)")
-        # Registered with --no-apply (or applied elsewhere) but not deployed here yet.
+        # Registered with --no-rebuild (or applied elsewhere) but not deployed here yet.
         a = {
             "source": "toml",
             "home": os.path.join(state["homeBase"], args.name),
@@ -436,8 +439,8 @@ def cmd_rm(state, args):
     else:
         warn(f"{path} was already gone")
 
-    if not args.no_apply:
-        apply(state)
+    if not args.no_rebuild:
+        rebuild(state)
 
     if args.purge:
         for p in (a.get("home"), a.get("stateDir")):
@@ -450,11 +453,6 @@ def cmd_rm(state, args):
             f"future agent may receive; delete or chown it, or use --purge next time"
         )
     print(f"agent '{args.name}' removed")
-
-
-def cmd_apply(state, args):
-    need_root()
-    apply(state, dry_run=args.dry_run)
 
 
 def service_or_die(a, name):
@@ -603,7 +601,7 @@ def build_parser():
     s = sub.add_parser("harnesses", help="list available harness recipes and their secrets")
     s.set_defaults(func=cmd_harnesses)
 
-    s = sub.add_parser("add", help="register a new agent and apply", description="Register a new agent: write <registry>/<name>.toml, store its secrets, rebuild.")
+    s = sub.add_parser("add", help="register a new agent and rebuild", description="Register a new agent: write <registry>/<name>.toml, store its secrets, rebuild the host.")
     s.add_argument("name")
     s.add_argument("--harness", required=True, help="recipe name (see `agentctl harnesses`)")
     s.add_argument("--model", help="default model id for the harness")
@@ -617,19 +615,15 @@ def build_parser():
     s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
     s.add_argument("--secret", action="append", metavar="K=V", help="set a secret now instead of being prompted (repeatable)")
     s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
-    s.add_argument("--no-apply", action="store_true", help="write the registry entry but do not rebuild")
+    s.add_argument("--no-rebuild", action="store_true", help="write the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_add)
 
-    s = sub.add_parser("rm", help="unregister an agent and apply")
+    s = sub.add_parser("rm", help="unregister an agent and rebuild")
     s.add_argument("name")
     s.add_argument("--purge", action="store_true", help="also delete the home directory, state and secrets")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
-    s.add_argument("--no-apply", action="store_true", help="remove the registry entry but do not rebuild")
+    s.add_argument("--no-rebuild", action="store_true", help="remove the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_rm)
-
-    s = sub.add_parser("apply", help="rebuild the host from the current registry")
-    s.add_argument("--dry-run", action="store_true", help="show what would change without switching")
-    s.set_defaults(func=cmd_apply)
 
     for name, help_ in (("start", "start the agent's service"), ("stop", "stop the agent's service"), ("restart", "restart the agent's service")):
         s = sub.add_parser(name, help=help_)
