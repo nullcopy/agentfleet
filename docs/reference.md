@@ -65,6 +65,33 @@ agent; `edit` opens it in `$EDITOR`; `list` prints key names only. Hermes
 picks its provider from whichever of `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`
 or `OPENAI_API_KEY` is set.
 
+## Other model providers
+
+Hermes talks to any OpenAI-compatible endpoint when `model.provider` is
+`custom`. The endpoint and the name of the environment variable holding its
+key go in `[settings.model]`; the key itself goes in the secrets file like a
+provider key. With `agentctl add`:
+
+```sh
+sudo agentctl add scout --model <model id as the provider names it> \
+  --set model.provider=custom \
+  --set model.base_url=https://api.example.net/v1 \
+  --set model.key_env=EXAMPLE_API_KEY \
+  --secret EXAMPLE_API_KEY=...
+```
+
+which writes
+
+```toml
+[settings.model]
+provider = "custom"
+base_url = "https://api.example.net/v1"
+key_env = "EXAMPLE_API_KEY"
+```
+
+`--secret` and `agentctl secrets set` accept any variable name, not only the
+three that are prompted for.
+
 ## The sandbox
 
 Every agent service runs with: no capabilities, read-only system except its
