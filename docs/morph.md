@@ -7,17 +7,26 @@ agent with three extra config keys and a key under a name of your choosing.
 
 ## Create one
 
-```
-$ sudo agentctl add scout \
+```sh
+sudo agentctl add scout \
     --model morph-glm53-744b \
     --description "research assistant" \
     --set model.provider=custom \
     --set model.base_url=https://api.morphllm.com/v1 \
     --set model.key_env=MORPH_API_KEY \
     --secret MORPH_API_KEY --no-prompt
+```
+
+You are asked for the Morph key with hidden input, then the file is written,
+the host rebuilt, and the agent introduces itself on Matrix:
+
+```
   MORPH_API_KEY: ********
 wrote /etc/nixos/agents/scout.toml
-...
+git: staged (commit when you are happy with it)
+wrote 1 secret(s) to /var/lib/agents/scout/secrets.env
+==> nixos-rebuild switch --flake /etc/nixos
+agent 'scout' is up and will introduce itself to @alice:example.com on Matrix.
 ```
 
 `--no-prompt` skips the Anthropic, OpenRouter and OpenAI prompts, which this
