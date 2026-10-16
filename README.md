@@ -33,6 +33,7 @@ What agentfleet is, in five points:
 - [End-to-end example](docs/e2e-example.md): create an agent, receive its introduction, chat, remove it.
 - [agentctl](docs/agentctl.md): every command, including the Matrix ones.
 - [A Morph-backed agent](docs/morph.md): using an OpenAI-compatible provider, and Morph's models.
+- [A Prime Intellect-backed agent](docs/primeintellect.md): the same recipe for Prime Inference and its catalog.
 - [Reference](docs/reference.md): what an agent is on disk, what it gets, secrets, the sandbox, how the Matrix side works, what Nix owns.
 
 ```

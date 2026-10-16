@@ -81,7 +81,8 @@ credential-looking name in `--env` or `--set`, so keys always end up here.
 Hermes talks to any OpenAI-compatible endpoint when `model.provider` is
 `custom`, with `model.base_url` and `model.key_env` naming the endpoint and
 the environment variable that holds its key. [A Morph-backed agent](morph.md)
-walks through it; the same recipe works for any such provider.
+and [a Prime Intellect-backed agent](primeintellect.md) walk through it; the
+same recipe works for any such provider.
 
 ## The sandbox
 
@@ -174,5 +175,5 @@ modules/matrix.nix        the fleet's Matrix server: Synapse, Postgres, reconcil
 pkgs/agentctl/            the admin CLI (python, stdlib only) and its shell completions
 pkgs/agentfleet-matrix/   the Matrix reconciler (python, stdlib only)
 checks/                   example host, NixOS VM test
-docs/                     install, end-to-end example, agentctl, Morph, this reference
+docs/                     install, end-to-end example, agentctl, Morph, Prime Intellect, this reference
 ```
