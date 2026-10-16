@@ -26,7 +26,9 @@ on disk show up as `removed`.
 
 **`add <name>`** writes `<registry>/<name>.toml`, stages it in git, stores
 the provider key, runs `nixos-rebuild switch`, and the new agent introduces
-itself to you on Matrix.
+itself to you on Matrix. After the rebuild it checks that the agent's service
+is running and exits non-zero with a hint if it is not, most often because
+the Matrix server is down.
 
 | option | effect |
 | --- | --- |

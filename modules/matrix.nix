@@ -27,6 +27,22 @@ let
     ;
 
   stateDir = "/var/lib/agentfleet/matrix";
+
+  wildcards = [
+    "0.0.0.0"
+    "::"
+  ];
+  loopbacks = [
+    "127.0.0.1"
+    "::1"
+  ];
+  # A wildcard already covers loopback; binding both fails with EADDRINUSE.
+  bindAddresses =
+    if lib.any (a: lib.elem a wildcards) m.listenAddresses then
+      lib.unique m.listenAddresses
+    else
+      lib.unique ([ "127.0.0.1" ] ++ m.listenAddresses);
+  specificAddresses = lib.filter (a: !(lib.elem a (wildcards ++ loopbacks))) m.listenAddresses;
   synapseSecrets = "${stateDir}/synapse-secrets.yaml";
 
   spec = builtins.toJSON {
@@ -91,6 +107,12 @@ in
         this host at when the proxy runs on another machine, and open
         `listenPort` to that machine only: the listener is unencrypted and
         exposes the admin API.
+
+        A specific address that belongs to a VPN interface may not exist yet
+        when Synapse starts at boot, so for any address other than loopback
+        or a wildcard the module enables `net.ipv4.ip_nonlocal_bind` (and the
+        IPv6 equivalent), which lets the bind succeed early. `0.0.0.0` or `::`
+        replace loopback instead of being added to it.
       '';
     };
 
@@ -159,7 +181,7 @@ in
         listeners = [
           {
             port = m.listenPort;
-            bind_addresses = lib.unique ([ "127.0.0.1" ] ++ m.listenAddresses);
+            bind_addresses = bindAddresses;
             type = "http";
             tls = false;
             x_forwarded = true;
@@ -182,6 +204,14 @@ in
     };
 
     services.postgresql.enable = true;
+
+    # Synapse refuses to start if one of its addresses is not assigned yet
+    # (a VPN interface that comes up after it, at boot). Non-local bind lets
+    # the socket exist before the address does.
+    boot.kernel.sysctl = mkIf (specificAddresses != [ ]) {
+      "net.ipv4.ip_nonlocal_bind" = 1;
+      "net.ipv6.ip_nonlocal_bind" = 1;
+    };
 
     # The registration shared secret Synapse and the reconciler share.
     systemd.services.agentfleet-matrix-secret = {

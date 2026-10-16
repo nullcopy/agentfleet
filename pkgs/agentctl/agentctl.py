@@ -64,7 +64,10 @@ def run(cmd, check=True, capture=False, **kw):
 
 
 def systemctl(*args, check=True, capture=False):
-    return run(["systemctl", *args], check=check, capture=capture)
+    r = run(["systemctl", *args], check=False, capture=capture)
+    if check and r.returncode != 0:
+        die(f"`systemctl {' '.join(args)}` failed (exit {r.returncode}); see `agentctl status` and `agentctl matrix status`", r.returncode)
+    return r
 
 
 def is_active(unit):
@@ -441,8 +444,26 @@ def cmd_add(state, args):
         print(f"skipping rebuild (--no-rebuild); run `{rebuild_cmd(state)}` when ready")
         return
     rebuild(state)
-    print(f"agent '{name}' is up and will introduce itself to {state['matrix']['operator']} on Matrix.")
-    print(f"Next: agentctl status {name} | agentctl logs {name} -f")
+    report_after_rebuild(state, name)
+
+
+def report_after_rebuild(state, name):
+    """The rebuild succeeded; say whether the agent actually runs. The new
+    state.json is in place now, so read it afresh."""
+    new = load_state()
+    a = new["agents"].get(name)
+    unit = (a or {}).get("service")
+    if unit and is_active(unit):
+        print(f"agent '{name}' is up and will introduce itself to {new['matrix']['operator']} on Matrix.")
+        print(f"Next: agentctl logs {name} -f")
+        return
+    synapse = new["matrix"]["synapseService"]
+    if not is_active(synapse):
+        warn(f"agent '{name}' is NOT running: the Matrix server ({synapse}) is down and the agents depend on it.")
+        warn(f"Inspect it with `agentctl matrix logs -n 50`; once it is up, run `agentctl start {name}`.")
+    else:
+        warn(f"agent '{name}' is NOT running ({unit_state(unit) if unit else 'no unit'}); see `agentctl logs {name}`.")
+    sys.exit(1)
 
 
 def cmd_rm(state, args):

@@ -215,8 +215,13 @@ On the fleet host:
 
 ```sh
 agentctl list                   # "no agents defined"
-sudo agentctl matrix status     # homeserver up, admin @agentfleet:matrix.example.org
+sudo agentctl matrix status     # first line must say "up"
 ```
+
+If `matrix status` says `DOWN`, nothing else will work: every agent requires
+the server. `sudo agentctl matrix logs -n 50` shows why. The usual causes are
+an address in `listenAddresses` that this host does not have (check with
+`ip addr`), or another program already on port 8008.
 
 From the proxy host, confirm it can reach Synapse over the private network:
 
