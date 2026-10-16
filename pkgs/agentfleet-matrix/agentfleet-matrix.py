@@ -90,13 +90,14 @@ def quote(s):
 # ----------------------------------------------------------------------------
 # state
 # ----------------------------------------------------------------------------
-def load_spec():
+def load_spec(with_agents=True):
     try:
         with open(SPEC_PATH) as f:
             spec = json.load(f)
     except FileNotFoundError:
         die(f"{SPEC_PATH} not found; is services.agentfleet enabled?")
-    spec["agents"] = load_agents(spec)
+    # /var/lib/agents is root-only; `check` runs unprivileged and needs no agents.
+    spec["agents"] = load_agents(spec) if with_agents else {}
     return spec
 
 
@@ -740,7 +741,7 @@ def main():
     args = p.parse_args()
     if os.geteuid() != 0 and args.func is not cmd_check:
         die("must run as root")
-    args.func(load_spec(), args)
+    args.func(load_spec(with_agents=args.func is not cmd_check), args)
 
 
 if __name__ == "__main__":
