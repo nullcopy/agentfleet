@@ -5,7 +5,7 @@
   makeWrapper,
   installShellFiles,
   systemd,
-  git,
+  shadow,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -25,7 +25,7 @@ stdenvNoCC.mkDerivation {
         lib.makeBinPath [
           python3
           systemd
-          git
+          shadow
         ]
       }
     installShellCompletion --bash --name agentctl completions/agentctl.bash

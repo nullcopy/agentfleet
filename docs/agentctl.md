@@ -1,15 +1,16 @@
 # agentctl
 
 `agentctl` runs on the fleet host. It reads `/etc/agents/state.json`, which
-the NixOS module renders, and otherwise only touches the registry directory,
-the secrets files, systemd and the Matrix reconciler. Commands that change
-anything need root. Tab completion for bash and zsh is installed with the
-package; agent names complete.
+the NixOS module renders with the host's fixed facts, and otherwise only
+touches `/var/lib/agents`, `/srv/agents`, the system user database, systemd
+and the Matrix reconciler. Nothing it does rebuilds the system. Commands that
+change anything need root. Tab completion for bash and zsh is installed with
+the package; agent names complete.
 
 ```
 agentctl list
 agentctl add <name> [options]
-agentctl rm <name> [--purge] [--yes] [--no-rebuild]
+agentctl rm <name> [--purge] [--yes]
 agentctl purge <name> [--yes]
 agentctl start|stop|restart <name> | --all
 agentctl status [<name>]
@@ -21,46 +22,57 @@ agentctl matrix [status|check|introduce <name>|rotate-token <name>|start|stop|re
 ## Agents
 
 **`list`** prints every agent with its service state, Matrix id, model and
-description. Agents that were removed without `--purge` and still have files
-on disk show up as `removed`.
+description. Agents removed with plain `rm` show as `removed`.
 
-**`add <name>`** writes `<registry>/<name>.toml`, stages it in git, stores
-the provider key, runs `nixos-rebuild switch`, and the new agent introduces
-itself to you on Matrix. After the rebuild it reports whether the agent runs
-and whether the invitation reached you; if the invite could not be delivered
-it points you at `matrix check`.
+**`add <name>`** creates the system user `agent-<name>`, the home
+`/srv/agents/<name>`, the state directory `/var/lib/agents/<name>` with
+`agent.json`, the secrets and environment files, seeds
+`~/.hermes/config.yaml`, asks the reconciler for a Matrix account and token,
+starts `agent@<name>.service` and reports whether the invitation reached
+you. It takes a few seconds. Other agents are not touched.
 
 | option | effect |
 | --- | --- |
 | `--model M` | Hermes model id, e.g. `anthropic/claude-sonnet-5.5` |
 | `--description TEXT` | shown by `list` and in the introduction DM |
-| `--memory-max SIZE`, `--cpu-quota PCT` | systemd `MemoryMax` / `CPUQuota` |
-| `--package PKG` | extra nixpkgs package on the agent's PATH, repeatable |
+| `--memory-max SIZE`, `--cpu-quota PCT` | systemd `MemoryMax` / `CPUQuota`, stored as a drop-in for this instance |
 | `--env K=V` | non-secret environment variable, repeatable |
 | `--set KEY=VAL` | Hermes `config.yaml` key, dotted; integers and `true`/`false` become literals. `--set-str` keeps a string |
 | `--secret KEY[=VALUE]` | a secret to store; without `=VALUE` you are prompted with hidden input |
 | `--no-prompt` | skip the prompts for the three well-known provider keys |
-| `--no-rebuild` | write the file, do not rebuild |
+| `--no-start` | create everything but do not start the agent |
 
-**`rm <name>`** stops the agent, removes its registry file, rebuilds. The
-Matrix account is locked and the home, state and secrets stay on disk, so a
-later `add` with the same name resumes where it left off: same account, same
-DM room, same memory. With `--purge` the files are deleted, the account
-leaves every room, is logged out and locked, and the name is retired: no
-agent of that name can ever be created again, on purpose. Nix-defined agents
-cannot be removed here.
+Running `add` for a name that was removed with plain `rm` resumes that
+agent: same user, same home and memory, same Matrix account and DM room.
+Flags given on the resume override the stored values; secrets are kept.
 
-**`purge <name>`** does the `--purge` part for an agent that was removed
-earlier without it. Refuses while the agent is still defined.
+**`rm <name>`** stops the agent and marks it removed. The home, state,
+secrets and Matrix account are kept, the account is locked, so `add` with
+the same name brings it back exactly as it was. With `--purge` everything on
+the host is deleted, the system user removed, the Matrix account leaves and
+forgets every room, is logged out and locked, and the name is retired: no
+agent of that name can ever be created again, on purpose.
 
-**`start`, `stop`, `restart`** act on one agent's service, or on every
-enabled agent with `--all`.
+**`purge <name>`** is `rm --purge`, also for an agent that was removed
+earlier without it.
+
+**`start`, `stop`, `restart`** act on one agent's service, or on every agent
+with `--all`. At boot, `agentfleet-agents.service` runs `start --all`.
 
 **`status [<name>]`** is `systemctl status` for one agent, or the `list`
 table.
 
-**`logs <name>`** is `journalctl` for the agent's units; `-f` follows,
+**`logs <name>`** is `journalctl` for the agent's unit; `-f` follows,
 `-n` sets the number of lines.
+
+## Changing an agent
+
+Model, description and limits: `agentctl add <name> --model ... ` after a
+plain `rm`, which resumes it with the new values. Environment variables the
+same way with `--env`. Hermes settings after the first start live in
+`/srv/agents/<name>/.hermes/config.yaml`, a YAML file Hermes owns; edit it as
+that agent's user and `agentctl restart <name>`, or use Hermes's own chat
+commands such as `/model`.
 
 ## Secrets
 
@@ -76,10 +88,11 @@ the service by systemd. Any variable name is accepted.
 
 ## Matrix
 
-The fleet's Matrix server is Synapse, run by `matrix-synapse.service`. After
-every rebuild `agentfleet-matrix.service` (the reconciler) gives each agent
-an account and a token and sends the one-time introduction. Every agent
-service requires both, so stopping the server stops the agents.
+The fleet's Matrix server is Synapse, run by `matrix-synapse.service`. The
+reconciler, `agentfleet-matrix`, gives each agent an account and a token and
+sends the one-time introduction; `agentctl add` calls it for the new agent,
+and `agentfleet-matrix.service` runs it once at boot as a safety net. Every
+agent service requires Synapse, so stopping the server stops the agents.
 
 | subcommand | what it does |
 | --- | --- |
@@ -87,12 +100,9 @@ service requires both, so stopping the server stops the agents.
 | `matrix` or `matrix status` | is the homeserver up, which admin account bootstrapped it, who the operator is, and one row per agent account: `pending` (not yet provisioned), `active`, `locked` (removed with `rm`), `purged` (name retired), plus the id of the introduction room |
 | `matrix introduce <name>` | send the introduction DM again, for example after federation started working |
 | `matrix rotate-token <name>` | log the agent out of every session and issue a fresh token; the agent restarts with it. Use when a token may have leaked |
-| `matrix stop` | stop Synapse. The reconciler and every agent stop with it |
-| `matrix start` | start Synapse, the reconciler and every enabled agent |
-| `matrix restart` | restart Synapse; systemd restarts the reconciler and the agents after it |
+| `matrix stop` | stop Synapse. Every agent stops with it |
+| `matrix start` | start Synapse, the reconciler and every agent |
+| `matrix restart` | restart Synapse; systemd restarts the agents after it |
 | `matrix logs [-f] [-n N]` | journal of Synapse and the reconciler |
 
 Account records and the admin token live in `/var/lib/agentfleet/matrix/`.
-The reconciler runs again on every rebuild and on
-`systemctl restart agentfleet-matrix.service`, which is also how a failed
-introduction is retried.

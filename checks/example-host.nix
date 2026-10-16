@@ -1,4 +1,4 @@
-# Exercises both agent sources and the Matrix server. Used by `nix flake check`
+# The platform as a host would configure it. Used by `nix flake check`
 # (evaluation only) and handy as a reference.
 { pkgs, lib, ... }:
 
@@ -12,24 +12,12 @@
   networking.hostName = "example";
 
   services.agentfleet = {
-    registry.dir = ./example-registry;
-    flakeDir = "/etc/nixos";
-
+    enable = true;
+    extraPackages = [ pkgs.python3 ];
     matrix = {
       serverName = "matrix.example.org";
       operator = "@alice:example.com";
       listenAddresses = [ "10.0.0.2" ]; # reverse proxy on another machine
-    };
-
-    agents.scribe = {
-      model = "anthropic/claude-sonnet-5.5";
-      description = "writes things down";
-      matrix.localpart = "scribe2";
-      memoryMax = "4G";
-    };
-
-    agents.parked = {
-      enable = false;
     };
   };
 }

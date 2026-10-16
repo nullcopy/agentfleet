@@ -8,9 +8,8 @@ touching the agent on the command line; `agentctl` runs on the host, the
 conversation happens in your Matrix client.
 
 If you skipped the check, run it now. An agent whose invitation cannot be
-delivered shows up as `up, but its invitation ... could not be delivered`
-at the end of `agentctl add`, and `sudo agentctl matrix status` lists it
-with `-` in the INTRODUCED column.
+delivered says so at the end of `agentctl add`, and `sudo agentctl matrix
+status` lists it with `-` in the INTRODUCED column.
 
 ## 1. Create the agent
 
@@ -21,17 +20,20 @@ $ sudo agentctl add scout \
   ANTHROPIC_API_KEY (Anthropic API key) [enter to skip]: ********
   OPENROUTER_API_KEY (OpenRouter API key) [enter to skip]:
   OPENAI_API_KEY (OpenAI or OpenAI-compatible endpoint key) [enter to skip]:
-wrote /etc/nixos/agents/scout.toml
-git: staged (commit when you are happy with it)
 wrote 1 secret(s) to /var/lib/agents/scout/secrets.env
-==> nixos-rebuild switch --flake /etc/nixos
+seeded /srv/agents/scout/.hermes/config.yaml
+created agent 'scout' (agent-scout, /srv/agents/scout)
+agentfleet-matrix: created @scout:matrix.example.org
+agentfleet-matrix: scout: token written to /var/lib/agents/scout/matrix.env
+agentfleet-matrix: scout: introduced to @alice:example.com in !kGh...:matrix.example.org
 agent 'scout' is up and has invited @alice:example.com to !kGh...:matrix.example.org. Accept the invite in your Matrix client.
 Next: agentctl logs scout -f
 ```
 
-One provider key is enough. During the rebuild the host created the user
-`agent-scout`, the Matrix account `@scout:matrix.example.org`, wrote its token
-where only root and the agent's service can read it, and started Hermes:
+One provider key is enough. In those few seconds the host created the user
+`agent-scout`, the Matrix account `@scout:matrix.example.org`, wrote its
+token where only root and the agent's service can read it, and started
+Hermes. Nothing was rebuilt and no other agent noticed:
 
 ```
 $ agentctl list
@@ -78,17 +80,15 @@ you), and mention it when you want it:
 
 Create a second agent and invite it to the same room; each answers when
 mentioned and keeps its own memory in its own home. For a room where an agent
-should answer everything, give it the room id and rebuild:
-
-```toml
-# /etc/nixos/agents/scout.toml
-[environment]
-MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.example.org"
-```
+should answer everything, give it the room id as an environment variable:
 
 ```sh
-sudo nixos-rebuild switch --flake /etc/nixos
+sudo agentctl rm scout --yes
+sudo agentctl add scout --env MATRIX_FREE_RESPONSE_ROOMS='!abc123:matrix.example.org'
 ```
+
+`rm` without `--purge` keeps everything, and `add` with the same name resumes
+the agent with the new variable: same account, same memory, same DM room.
 
 Hermes chat commands work as usual: `/model`, `/status`, `/new`. If your
 client swallows `/`, use `!status`.
@@ -101,21 +101,19 @@ homes, their tokens, or yours.
 
 ```
 $ sudo agentctl rm scout --purge
-Remove agent 'scout' and PURGE it: delete home, state and secrets, and retire the name for good? [y/N] y
-removed /etc/nixos/agents/scout.toml
-==> nixos-rebuild switch --flake /etc/nixos
-agentfleet-matrix: scout: agent gone, locked @scout:matrix.example.org and logged out its devices
-purged /srv/agents/scout
-purged /var/lib/agents/scout
+Remove agent 'scout' and PURGE it: delete home, state and secrets, leave its rooms, and retire the name for good? [y/N] y
+stopped agent@scout.service
+deleted /srv/agents/scout
+deleted /var/lib/agents/scout
 agentfleet-matrix: purged @scout:matrix.example.org: left 1 room(s), logged out, locked; the name 'scout' can never be used again
-agent 'scout' removed
+agent 'scout' purged; the name can never be used again
 ```
 
 Two kinds of removal, pick deliberately:
 
 - **`rm scout`** keeps the home, the state and the Matrix account, merely
-  locked. A later `agentctl add scout` unlocks it and the agent is back with
-  its memory and its old DM room.
+  locked. A later `agentctl add scout` brings the agent back with its memory
+  and its old DM room.
 - **`rm scout --purge`** deletes everything on the host, makes the account
   leave every room and retires the name: `scout` can never be created again.
   Use it for agents you are done with.

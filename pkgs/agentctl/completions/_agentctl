@@ -27,8 +27,8 @@ _agentctl() {
             local -a cmds
             cmds=(
                 'list:show all agents, their state and Matrix id'
-                'add:create an agent and rebuild'
-                'rm:remove an agent and rebuild; its Matrix account is locked'
+                'add:create an agent and start it'
+                'rm:stop and remove an agent; files and account kept unless --purge'
                 'purge:delete what rm left behind and retire the name for good'
                 'start:start an agent, or all with --all'
                 'stop:stop an agent, or all with --all'
@@ -49,16 +49,15 @@ _agentctl() {
                         '--description[free text]:description:' \
                         '--memory-max[systemd MemoryMax]:size:' \
                         '--cpu-quota[systemd CPUQuota]:percent:' \
-                        '*--package[extra nixpkgs package]:package:' \
                         '*--env[non-secret environment variable]:K=V:' \
                         '*--set[Hermes config.yaml key]:KEY=VAL:' \
                         '*--set-str[config key, value kept as string]:KEY=VAL:' \
                         '*--secret[key to store; prompted without =VALUE]:KEY[=VALUE]:' \
                         '--no-prompt[never prompt for secrets]' \
-                        '--no-rebuild[do not rebuild the host]'
+                        '--no-start[create but do not start]'
                     ;;
                 rm)
-                    _arguments '1:agent:_agentctl_names' '--purge[also delete home, state, secrets and the Matrix account]' '(-y --yes)'{-y,--yes}'[skip confirmation]' '--no-rebuild[do not rebuild the host]'
+                    _arguments '1:agent:_agentctl_names' '--purge[delete everything and retire the name]' '(-y --yes)'{-y,--yes}'[skip confirmation]'
                     ;;
                 purge)
                     _arguments '1:removed agent:_agentctl_removed' '(-y --yes)'{-y,--yes}'[skip confirmation]'

@@ -53,40 +53,21 @@
               ./checks/example-host.nix
             ];
           };
-          # A freshly installed host: registry configured, no agents yet.
-          # agentctl and state.json must still be there.
-          fresh = nixpkgs.lib.nixosSystem {
-            modules = [
-              { nixpkgs.hostPlatform = system; }
-              self.nixosModules.default
-              ./checks/example-host.nix
-              {
-                services.agentfleet.agents = nixpkgs.lib.mkForce { };
-                services.agentfleet.registry.dir = nixpkgs.lib.mkForce ./checks/empty-registry;
-              }
-            ];
-          };
-          freshOk =
-            assert fresh.config.services.agentfleet.enable;
-            assert builtins.any (p: (p.pname or "") == "agentctl") fresh.config.environment.systemPackages;
-            fresh.config.environment.etc."agents/state.json".text;
         in
         {
           # Evaluates the module and renders the units. The string context is
           # dropped so the agents' profiles are not built.
           eval = pkgs.writeText "agentfleet-eval" (
             builtins.unsafeDiscardStringContext (
+              assert builtins.any (p: (p.pname or "") == "agentctl") example.config.environment.systemPackages;
+              assert example.config.systemd.services."agent@".serviceConfig.User == "agent-%i";
               example.config.environment.etc."agents/state.json".text
               + "\n"
               + example.config.environment.etc."agents/matrix.json".text
               + "\n"
-              + freshOk
+              + example.config.systemd.units."agent@.service".text
               + "\n"
-              + builtins.concatStringsSep "\n" (
-                nixpkgs.lib.filter (nixpkgs.lib.hasPrefix "agent") (
-                  builtins.attrNames example.config.systemd.services
-                )
-              )
+              + example.config.systemd.units."agentfleet-agents.service".text
             )
           );
           agentctl = self.packages.${system}.agentctl;

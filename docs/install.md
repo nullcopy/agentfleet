@@ -4,10 +4,11 @@ agentfleet is added to a NixOS host you already run and administer with a
 flake. If you want to see a complete host flake, see
 [nixos-core](https://github.com/nullcopy/nixos-core).
 
-The host's flake checkout, `/etc/nixos` below, becomes the source of truth for
-the fleet: each agent is a small TOML file inside it, `agentctl` edits those
-files and runs `nixos-rebuild` for you, and the NixOS module turns them into
-users, services and Matrix accounts.
+Nix owns the platform: the Hermes package and the agents' toolset, the
+sandbox, the Matrix server and the `agentctl` tool. Agents themselves are
+runtime state that `agentctl` creates and destroys in seconds, without a
+rebuild, so an unrelated system change never touches a running agent and a
+rebuild never happens behind your back.
 
 Installation has two phases. First you stand up the Matrix server and prove
 that the internet can reach it (steps 1 to 6). Only then do you create agents
@@ -99,19 +100,17 @@ Add this to `configuration.nix`. Every value you must change is marked
 
 ```nix
 services.agentfleet = {
-  # Where this flake is checked out ON THE HOST. agentctl writes new agent
-  # files here and runs `nixos-rebuild switch --flake <flakeDir>`.
-  flakeDir = "/etc/nixos";                            # CHANGE if your checkout lives elsewhere
-
-  # The directory of per-agent TOML files, as a Nix path relative to this
-  # file. It must be inside the flake so Nix can read it at build time.
-  registry.dir = ./agents;
+  enable = true;
 
   matrix = {
     serverName = "matrix.example.org";                # CHANGE: permanent, see step 1
     operator = "@alice:example.com";                  # CHANGE: your own Matrix id
     listenAddresses = [ "10.0.0.2" ];                 # CHANGE: this host's address as the proxy sees it
   };
+
+  # Optional: tools every agent gets on its PATH, besides git, curl, jq,
+  # ripgrep and ssh which are always there.
+  # extraPackages = [ pkgs.python3 pkgs.nodejs ];
 };
 ```
 
@@ -133,15 +132,14 @@ every interface.
 
 What each value does:
 
-| value                    | meaning                                                                                                                                                                     |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `flakeDir`               | Path of the flake checkout on disk. `agentctl add` writes `<flakeDir>/agents/<name>.toml` and rebuilds from here.                                                           |
-| `registry.dir`           | The same `agents` directory as a Nix path, so the module can read the TOML files at build time. If you name it differently, also set `registry.hostPath` to the disk path. |
-| `matrix.serverName`      | The part after the colon in every agent's user id. Cannot change later.                                                                                                     |
-| `matrix.operator`        | The one Matrix user the agents accept messages and invites from, and DM when they come up. Must be on another homeserver.                                                   |
-| `matrix.listenAddresses` | Private addresses Synapse listens on, in addition to loopback. Leave it out when the proxy runs on the fleet host itself.                                                    |
-| `matrix.publicBaseUrl`   | Only if the public URL is not `https://<serverName>`.                                                                                                                       |
-| `matrix.listenPort`      | Only if 8008 clashes with something; default 8008.                                                                                                                          |
+| value                    | meaning                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `matrix.serverName`      | The part after the colon in every agent's user id. Cannot change later.                                                   |
+| `matrix.operator`        | The one Matrix user the agents accept messages and invites from, and DM when they come up. Must be on another homeserver. |
+| `matrix.listenAddresses` | Private addresses Synapse listens on, in addition to loopback. Leave it out when the proxy runs on the fleet host itself.  |
+| `matrix.publicBaseUrl`   | Only if the public URL is not `https://<serverName>`.                                                                     |
+| `matrix.listenPort`      | Only if 8008 clashes with something; default 8008.                                                                        |
+| `extraPackages`          | Extra tools on every agent's PATH.                                                                                        |
 
 Synapse speaks plain, unauthenticated HTTP on `listenAddresses`, and that
 listener includes the admin API. Never expose it beyond the proxy host.
@@ -201,20 +199,17 @@ outer braces removed, plus `networking.firewall.allowedTCPPorts = [ 80 443 ];`.
 If the proxy runs on the fleet host, leave `listenAddresses` and the firewall
 line out of step 3 and use `127.0.0.1:8008` here.
 
-## 5. Stand up the server: create the registry directory and rebuild
+## 5. Stand up the server: rebuild
 
 On the fleet host:
 
 ```sh
-cd /etc/nixos
-mkdir -p agents && touch agents/.keep
-git add agents flake.nix configuration.nix   # flakes ignore untracked files
-sudo nixos-rebuild switch --flake .
+sudo nixos-rebuild switch --flake /etc/nixos
 ```
 
 The first rebuild builds Hermes and Synapse, which takes a while. When it is
-done, Synapse runs on the host and the reconciler has created the admin
-account; no agents exist yet.
+done, Synapse runs on the host, the reconciler has created its admin account,
+and `agentctl` is on your PATH with tab completion. No agents exist yet.
 
 ## 6. Verify that the world can reach the server
 
@@ -262,19 +257,21 @@ mean:
 
 For reference, `sudo agentctl matrix status` shows the server, the admin
 account and the agents' accounts; with no agents yet it ends with
-`no matrix agents`.
+`no matrix agents`, and `agentctl list` says `no agents`.
 
 Now continue with the [end-to-end example](e2e-example.md) to create your
 first agent.
 
 ## Variations
 
-- **Agents in Nix instead of TOML.** Skip `registry.dir` and write
-  `services.agentfleet.agents.<name> = { model = "..."; };`. Both styles mix;
-  `agentctl rm` refuses to remove Nix-defined agents.
-- **Several hosts.** One flake, one `nixosConfigurations` entry and one
-  registry per host (`registry.dir = ./hosts/${hostName}/agents;`), each with
-  its own Matrix server and domain.
+- **Several hosts.** One `nixosConfigurations` entry per host, each with its
+  own Matrix server and domain. Agents are created on each host with its own
+  `agentctl`.
 - **Updating Hermes.** It comes from the `hermes-agent` input inside
-  agentfleet: `nix flake update agentfleet/hermes-agent`, then rebuild.
-  Synapse and everything else follow your `nixpkgs`.
+  agentfleet: `nix flake update agentfleet/hermes-agent`, then rebuild. That
+  rebuild restarts every agent, since the template unit changed; agents are
+  otherwise untouched by rebuilds. Synapse and everything else follow your
+  `nixpkgs`.
+- **Backups.** Everything about the fleet lives in `/var/lib/agents`,
+  `/srv/agents`, `/var/lib/agentfleet` and the `matrix-synapse` Postgres
+  database. Your flake is the platform, not the fleet.

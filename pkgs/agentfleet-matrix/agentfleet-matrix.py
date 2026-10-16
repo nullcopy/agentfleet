@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """agentfleet-matrix - keep the host's Matrix homeserver in step with the fleet.
 
-Runs as root from agentfleet-matrix.service after every activation, driven by
-/etc/agents/matrix.json which the NixOS module renders. It bootstraps an admin
-account, gives every declared agent a Matrix user and a fresh access token
-(written root-only to <stateDir>/<agent>/matrix.env), introduces new agents to
-the operator in a DM, and locks the accounts of agents that disappeared.
+Runs as root. /etc/agents/matrix.json (rendered by the NixOS module) says
+where the homeserver is and who the operator is; the agents are whatever
+agentctl created under /var/lib/agents/<name>/agent.json. It bootstraps an
+admin account, gives each agent a Matrix user and an access token (written
+root-only to /var/lib/agents/<name>/matrix.env), introduces new agents to the
+operator in a DM, and locks the accounts of removed agents. agentctl calls
+`provision`/`lock`/`purge` for one agent; `reconcile` runs at boot.
 
 Only the Synapse admin API and the plain client API are used (stdlib only).
 """
@@ -91,9 +93,35 @@ def quote(s):
 def load_spec():
     try:
         with open(SPEC_PATH) as f:
-            return json.load(f)
+            spec = json.load(f)
     except FileNotFoundError:
-        die(f"{SPEC_PATH} not found; is services.agentfleet.matrix enabled?")
+        die(f"{SPEC_PATH} not found; is services.agentfleet enabled?")
+    spec["agents"] = load_agents(spec)
+    return spec
+
+
+def load_agents(spec):
+    """The agents agentctl created: /var/lib/agents/<name>/agent.json with
+    state "active". Removed agents (state "removed") are not listed, so the
+    reconciler locks them like any other vanished agent."""
+    out = {}
+    d = spec["agentsDir"]
+    if not os.path.isdir(d):
+        return out
+    for name in sorted(os.listdir(d)):
+        a = read_json(os.path.join(d, name, "agent.json"))
+        if not a or a.get("state", "active") != "active":
+            continue
+        localpart = a.get("localpart") or name
+        out[name] = {
+            "localpart": localpart,
+            "userId": f"@{localpart}:{spec['serverName']}",
+            "model": a.get("model"),
+            "description": a.get("description", ""),
+            "service": spec["unitTemplate"] % name,
+            "envFile": os.path.join(d, name, "matrix.env"),
+        }
+    return out
 
 
 def read_json(path, default=None):
@@ -326,7 +354,8 @@ def intro_message(spec, name, a):
 
 def write_env(a, token, device):
     write_private(a["envFile"], (
-        "# Written by agentfleet-matrix; replaced on every reconcile that rotates the token.\n"
+        "# Written by agentfleet-matrix; replaced when the token is rotated.\n"
+        f"MATRIX_USER_ID={env_quote(a['userId'])}\n"
         f"MATRIX_ACCESS_TOKEN={env_quote(token)}\n"
         f"MATRIX_DEVICE_ID={env_quote(device)}\n"
     ), mode=0o400)
@@ -612,7 +641,7 @@ def cmd_status(spec, args):
 def _spec_agent(spec, name):
     a = spec["agents"].get(name)
     if a is None:
-        die(f"agent '{name}' is not a Matrix-enabled agent on this host")
+        die(f"no agent named '{name}' (see `agentctl list`)")
     return a
 
 
@@ -626,6 +655,35 @@ def cmd_introduce(spec, args):
         rec = read_json(record_path(spec, args.name), {})
     rec.pop("introduced_room", None)
     introduce(syn, spec, args.name, a, rec, resend=True)
+
+
+def cmd_provision(spec, args):
+    """agentctl add: account, token, introduction for one agent. Exit 1 only
+    when the account itself cannot be provisioned."""
+    wait_for_homeserver(spec["clientUrl"], seconds=30)
+    a = _spec_agent(spec, args.name)
+    syn = Synapse(spec)
+    syn.ensure_admin()
+    rec = read_json(record_path(spec, args.name), {})
+    try:
+        provision(syn, spec, args.name, a, rec)
+    except ProvisionError as e:
+        die(str(e))
+
+
+def cmd_lock(spec, args):
+    """agentctl rm: lock the account of an agent that was just removed."""
+    if args.name in spec["agents"]:
+        die(f"agent '{args.name}' still exists; remove it first")
+    rec = read_json(record_path(spec, args.name))
+    if not rec or rec.get("state") != "active":
+        return
+    syn = Synapse(spec)
+    syn.ensure_admin()
+    syn.lock(rec["user_id"])
+    rec["state"] = "locked"
+    write_json(record_path(spec, args.name), rec)
+    log(f"locked {rec['user_id']} and logged out its devices")
 
 
 def cmd_rotate(spec, args):
@@ -645,14 +703,12 @@ def cmd_purge(spec, args):
     if args.name in spec["agents"]:
         die(f"agent '{args.name}' still exists; remove it first (agentctl rm --purge)")
     rec = read_json(record_path(spec, args.name))
-    if not rec:
-        die(f"no Matrix record for '{args.name}'")
-    if rec.get("state") == "purged":
+    if rec and rec.get("state") == "purged":
         print(f"{rec['user_id']} already purged")
         return
+    uid = rec["user_id"] if rec else f"@{args.name}:{spec['serverName']}"
     syn = Synapse(spec)
     syn.ensure_admin()
-    uid = rec["user_id"]
     left = syn.leave_all_rooms(uid)
     syn.lock(uid)
     write_json(record_path(spec, args.name), {"user_id": uid, "state": "purged", "purged_at": int(time.time())})
@@ -663,7 +719,13 @@ def main():
     p = argparse.ArgumentParser(prog="agentfleet-matrix", description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
     sub.required = True
-    sub.add_parser("reconcile", help="provision declared agents, lock vanished ones (run by the unit)").set_defaults(func=cmd_reconcile)
+    sub.add_parser("reconcile", help="provision every agent, lock vanished ones (run at boot)").set_defaults(func=cmd_reconcile)
+    s = sub.add_parser("provision", help="account, token and introduction for one agent (run by agentctl add)")
+    s.add_argument("name")
+    s.set_defaults(func=cmd_provision)
+    s = sub.add_parser("lock", help="lock a removed agent's account (run by agentctl rm)")
+    s.add_argument("name")
+    s.set_defaults(func=cmd_lock)
     sub.add_parser("status", help="homeserver, admin and per-agent account state").set_defaults(func=cmd_status)
     sub.add_parser("check", help="is the server reachable from the internet: DNS, TLS, proxy routes, .well-known, federation").set_defaults(func=cmd_check)
     s = sub.add_parser("introduce", help="(re)send the agent's introduction DM to the operator")

@@ -17,35 +17,32 @@ sudo agentctl add scout \
     --secret MORPH_API_KEY --no-prompt
 ```
 
-You are asked for the Morph key with hidden input, then the file is written,
-the host rebuilt, and the agent introduces itself on Matrix:
+You are asked for the Morph key with hidden input, then the agent is created
+and started, and it introduces itself on Matrix:
 
 ```
   MORPH_API_KEY: ********
-wrote /etc/nixos/agents/scout.toml
-git: staged (commit when you are happy with it)
 wrote 1 secret(s) to /var/lib/agents/scout/secrets.env
-==> nixos-rebuild switch --flake /etc/nixos
-agent 'scout' is up and will introduce itself to @alice:example.com on Matrix.
+seeded /srv/agents/scout/.hermes/config.yaml
+created agent 'scout' (agent-scout, /srv/agents/scout)
+agentfleet-matrix: created @scout:matrix.example.org
+agentfleet-matrix: scout: introduced to @alice:example.com in !kGh...:matrix.example.org
+agent 'scout' is up and has invited @alice:example.com to !kGh...:matrix.example.org. Accept the invite in your Matrix client.
 ```
 
 `--no-prompt` skips the Anthropic, OpenRouter and OpenAI prompts, which this
-agent does not need. The registry file that results:
+agent does not need. The `--set` keys end up in the agent's seeded
+`~/.hermes/config.yaml`:
 
-```toml
-model = "morph-glm53-744b"
-description = "research assistant"
-
-[settings.model]
-provider = "custom"
-base_url = "https://api.morphllm.com/v1"
-key_env = "MORPH_API_KEY"
+```yaml
+{"model": {"default": "morph-kimik3", "provider": "custom",
+           "base_url": "https://api.morphllm.com/v1", "key_env": "MORPH_API_KEY"}}
 ```
 
-To switch an existing agent to Morph, add that `[settings.model]` table to
-its file, run `sudo agentctl secrets set <name> MORPH_API_KEY`, delete
-`/srv/agents/<name>/.hermes/config.yaml` (it is seeded once and Hermes owns
-it afterwards), and rebuild.
+To switch an existing agent to Morph: `sudo agentctl secrets set <name>
+MORPH_API_KEY`, then edit `/srv/agents/<name>/.hermes/config.yaml` as that
+agent's user (it is a YAML file Hermes owns after the first start) to set the
+`model` keys above, and `sudo agentctl restart <name>`.
 
 ## Which model
 

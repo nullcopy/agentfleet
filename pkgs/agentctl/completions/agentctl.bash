@@ -15,18 +15,18 @@ _agentctl() {
     local names="" opts=""
     case $cmd in
         add)
-            opts="--model --description --memory-max --cpu-quota --package --env --set --set-str --secret --no-prompt --no-rebuild"
+            opts="--model --description --memory-max --cpu-quota --env --set --set-str --secret --no-prompt --no-start"
             case $prev in
-                --model|--description|--memory-max|--cpu-quota|--package|--env|--set|--set-str|--secret) return ;;
+                --model|--description|--memory-max|--cpu-quota|--env|--set|--set-str|--secret) return ;;
             esac
             ;;
         rm)
-            opts="--purge --yes --no-rebuild"
+            opts="--purge --yes"
             names=$(agentctl names 2>/dev/null)
             ;;
         purge)
             opts="--yes"
-            names=$(agentctl names --removed 2>/dev/null)
+            names="$(agentctl names 2>/dev/null) $(agentctl names --removed 2>/dev/null)"
             ;;
         start|stop|restart)
             opts="--all"

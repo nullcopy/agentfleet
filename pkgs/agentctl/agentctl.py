@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""agentctl - manage the Hermes agents on this host (agentfleet).
+"""agentctl - create, run and destroy the Hermes agents on this host (agentfleet).
 
-The NixOS module renders everything this tool needs to /etc/agents/state.json.
-agentctl itself knows nothing about Nix: it writes one TOML file per agent into
-the registry directory, runs nixos-rebuild, and shells out to systemd and to
-agentfleet-matrix for the rest.
+Agents are runtime state, not NixOS configuration: `add` creates a system
+user, a home, a state directory with agent.json, the secrets and the Matrix
+token, and starts one instance of the agent@.service template. Nothing is
+rebuilt. The NixOS module renders what agentctl needs to know about the host
+to /etc/agents/state.json; agentctl shells out to systemd, the shadow tools
+and agentfleet-matrix for the rest.
 """
 
 import argparse
 import getpass
+import grp
 import json
 import os
 import pwd
@@ -18,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 STATE_PATH = os.environ.get("AGENTCTL_STATE", "/etc/agents/state.json")
 DEFAULT_NAME_REGEX = "[a-z][a-z0-9-]{0,30}"
@@ -50,56 +54,24 @@ def load_state():
         die(f"{STATE_PATH} is not valid JSON: {e}")
 
 
-def get_agent(state, name):
-    a = state["agents"].get(name)
-    if a is None:
-        die(f"no agent named '{name}' (see `agentctl list`)")
-    return a
-
-
 def run(cmd, check=True, capture=False, **kw):
-    return subprocess.run(
-        cmd, check=check, text=True, capture_output=capture, **kw
-    )
+    r = subprocess.run(cmd, check=False, text=True, capture_output=capture, **kw)
+    if check and r.returncode != 0:
+        detail = (r.stderr or "").strip() if capture else ""
+        die(f"`{' '.join(cmd)}` failed (exit {r.returncode})" + (f": {detail}" if detail else ""), r.returncode)
+    return r
 
 
 def systemctl(*args, check=True, capture=False):
-    r = run(["systemctl", *args], check=False, capture=capture)
-    if check and r.returncode != 0:
-        die(f"`systemctl {' '.join(args)}` failed (exit {r.returncode}); see `agentctl status` and `agentctl matrix status`", r.returncode)
-    return r
+    return run(["systemctl", *args], check=check, capture=capture)
 
 
 def is_active(unit):
-    if not unit:
-        return False
-    r = systemctl("is-active", unit, check=False, capture=True)
-    return r.stdout.strip() == "active"
+    return systemctl("is-active", unit, check=False, capture=True).stdout.strip() == "active"
 
 
 def unit_state(unit):
-    r = systemctl("is-active", unit, check=False, capture=True)
-    return r.stdout.strip() or "unknown"
-
-
-def git(repo, *args, check=True, capture=False):
-    # The flake checkout is usually owned by the admin, not root; without
-    # safe.directory git refuses to touch it ("dubious ownership").
-    cmd = ["git", "-c", f"safe.directory={repo}", "-C", repo, *args]
-    r = run(cmd, check=False, capture=capture)
-    if check and r.returncode != 0:
-        detail = (r.stderr or "").strip() if capture else ""
-        die(f"`{' '.join(cmd)}` failed" + (f": {detail}" if detail else ""))
-    return r
-
-
-def in_git(path):
-    r = git(path, "rev-parse", "--is-inside-work-tree", check=False, capture=True)
-    return r.returncode == 0 and r.stdout.strip() == "true"
-
-
-def git_tracked(repo, path):
-    return git(repo, "ls-files", "--error-unmatch", path, check=False, capture=True).returncode == 0
+    return systemctl("is-active", unit, check=False, capture=True).stdout.strip() or "unknown"
 
 
 def confirm(prompt):
@@ -119,8 +91,97 @@ def valid_name(state, name):
         die(f"user name '{user}' would be longer than {limit} characters; pick a shorter name")
 
 
+def user_exists(name):
+    try:
+        pwd.getpwnam(name)
+        return True
+    except KeyError:
+        return False
+
+
 # ----------------------------------------------------------------------------
-# secrets file (KEY="VALUE", root-owned 0400; the systemd EnvironmentFile dialect)
+# layout
+# ----------------------------------------------------------------------------
+class Agent:
+    """Paths and names for one agent; `data` is agent.json if it exists."""
+
+    def __init__(self, state, name):
+        self.name = name
+        self.user = f"{state['userPrefix']}{name}"
+        self.home = os.path.join(state["homeBase"], name)
+        self.state_dir = os.path.join(state["stateDir"], name)
+        self.json_path = os.path.join(self.state_dir, "agent.json")
+        self.secrets_file = os.path.join(self.state_dir, "secrets.env")
+        self.environment_file = os.path.join(self.state_dir, "environment.env")
+        self.matrix_env = os.path.join(self.state_dir, "matrix.env")
+        self.unit = state["unitTemplate"] % name
+        self.data = read_json(self.json_path) or {}
+
+    @property
+    def exists(self):
+        return bool(self.data)
+
+    @property
+    def removed(self):
+        return self.data.get("state") == "removed"
+
+    @property
+    def active(self):
+        return self.exists and not self.removed
+
+    def save(self):
+        write_json(self.json_path, self.data)
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_json(path, obj, mode=0o600):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(obj, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def all_agents(state):
+    base = state["stateDir"]
+    pattern = state.get("nameRegex", DEFAULT_NAME_REGEX)
+    out = {}
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for n in names:
+        if re.fullmatch(pattern, n) and os.path.isdir(os.path.join(base, n)):
+            out[n] = Agent(state, n)
+    return out
+
+
+def get_agent(state, name, allow_removed=False):
+    a = Agent(state, name)
+    if not a.exists or (a.removed and not allow_removed):
+        die(f"no agent named '{name}' (see `agentctl list`)")
+    return a
+
+
+def matrix_record(state, name):
+    return read_json(os.path.join(state["matrix"]["stateDir"], "agents", f"{name}.json")) or {}
+
+
+def matrix_ctl(state, *args, check=True, capture=False):
+    return run([state["matrix"]["ctl"], *args], check=check, capture=capture)
+
+
+# ----------------------------------------------------------------------------
+# env files (KEY="VALUE", root-owned 0400; the systemd EnvironmentFile dialect)
 # ----------------------------------------------------------------------------
 _ENV_ESCAPE = '\\"$`'
 
@@ -181,19 +242,19 @@ def env_quote(v):
     return '"' + "".join("\\" + c if c in _ENV_ESCAPE else c for c in v) + '"'
 
 
-def write_env_file(path, values):
+def write_env_file(path, values, header="# Managed by agentctl. KEY=\"VALUE\", one per line."):
     try:
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".secrets.")
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".env.")
         with os.fdopen(fd, "w") as f:
-            f.write('# Managed by agentctl. KEY="VALUE", one per line.\n')
+            f.write(header + "\n")
             for k, v in sorted(values.items()):
                 f.write(f"{k}={env_quote(v)}\n")
         os.chmod(tmp, 0o400)
         os.chown(tmp, 0, 0)
         os.replace(tmp, path)
     except OSError as e:
-        die(f"cannot write {path}: {e.strerror}. If this file comes from sops-nix/agenix, change it there instead")
+        die(f"cannot write {path}: {e.strerror}")
 
 
 def parse_kv(items, what, prompt=False):
@@ -220,7 +281,7 @@ def parse_kv(items, what, prompt=False):
 
 
 def prompt_secrets(state, provided, no_prompt):
-    """Return the secrets to write for a new agent: one provider key is enough."""
+    """Secrets for a new agent: one provider key is enough."""
     values = dict(provided)
     for s in state.get("secrets", []):
         name = s["name"]
@@ -235,37 +296,33 @@ def prompt_secrets(state, provided, no_prompt):
     return values
 
 
+_SECRET_LIKE = re.compile(r".*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL).*")
+
+
+def secret_like(key):
+    u = key.upper()
+    return bool(_SECRET_LIKE.match(u)) and not u.endswith("_ENV")
+
+
+def refuse_secrets(name, keys):
+    """Credentials belong in secrets.env, where `secrets list` shows them and
+    nothing else does; a credential-looking name elsewhere is a mistake."""
+    bad = [k for k in keys if secret_like(k.rsplit(".", 1)[-1])]
+    if bad:
+        hint = (
+            f"use --secret {bad[0]} (or `agentctl secrets set {name} {bad[0]}`)"
+            if "." not in bad[0]
+            else f"store the value with --secret <NAME> and point Hermes at it with --set {bad[0]}_env=<NAME>"
+        )
+        die(f"{', '.join(bad)} look(s) like a secret; {hint} instead")
+
+
 # ----------------------------------------------------------------------------
-# TOML emission (stdlib only; we never rewrite a file we did not create)
+# Hermes settings (--set) and config.yaml seeding
 # ----------------------------------------------------------------------------
-def toml_scalar(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, str):
-        return json.dumps(v)
-    if isinstance(v, list):
-        return "[" + ", ".join(toml_scalar(x) for x in v) + "]"
-    die(f"cannot encode {v!r} as TOML")
-
-
-def toml_tables(d, prefix, out):
-    scalars = {k: v for k, v in d.items() if not isinstance(v, dict)}
-    tables = {k: v for k, v in d.items() if isinstance(v, dict)}
-    if scalars or not tables:
-        if prefix:
-            out.append(f"\n[{prefix}]")
-        for k, v in scalars.items():
-            key = k if re.match(r"^[A-Za-z0-9_-]+$", k) else json.dumps(k)
-            out.append(f"{key} = {toml_scalar(v)}")
-    for k, v in tables.items():
-        toml_tables(v, f"{prefix}.{k}" if prefix else k, out)
-
-
 def coerce(v):
-    """Turn a --set value into a TOML literal when it round-trips exactly
-    (so "0123" and "1_000" stay strings); use --set-str to force a string."""
+    """Turn a --set value into a literal when it round-trips exactly (so
+    "0123" and "1_000" stay strings); --set-str forces a string."""
     if v in ("true", "false"):
         return v == "true"
     try:
@@ -285,94 +342,85 @@ def set_nested(d, dotted, value):
     d[parts[-1]] = value
 
 
-_SECRET_LIKE = re.compile(r".*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL).*")
-
-
-def secret_like(key):
-    """Mirrors the module's check: the registry is world-readable (Nix store)
-    and committed, so credential-looking names are refused there."""
-    u = key.upper()
-    return bool(_SECRET_LIKE.match(u)) and not u.endswith("_ENV")
-
-
-def refuse_secrets(name, keys):
-    bad = [k for k in keys if secret_like(k.rsplit(".", 1)[-1])]
-    if bad:
-        hint = (
-            f"use --secret {bad[0]} (or `agentctl secrets set {name} {bad[0]}`)"
-            if "." not in bad[0]
-            else f"store the value with --secret <NAME> and point Hermes at it with --set {bad[0]}_env=<NAME>"
-        )
-        die(
-            f"{', '.join(bad)} look(s) like a secret and would land in the registry, which is copied "
-            f"into the world-readable Nix store and committed to git; {hint} instead"
-        )
-
-
-def render_agent_toml(args):
-    top = {}
-    if args.description:
-        top["description"] = args.description
-    if args.model:
-        top["model"] = args.model
-    if args.memory_max:
-        top["memory_max"] = args.memory_max
-    if args.cpu_quota:
-        top["cpu_quota"] = args.cpu_quota
-    if args.package:
-        top["packages"] = args.package
-    out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
-    toml_tables(top, "", out)
-    env = parse_kv(args.env, "--env")
-    refuse_secrets(args.name, env)
-    if env:
-        toml_tables(env, "environment", out)
+def parse_settings(name, sets, set_strs):
     settings = {}
-    for item, literal in [(x, True) for x in args.set or []] + [(x, False) for x in args.set_str or []]:
+    for item, literal in [(x, True) for x in sets or []] + [(x, False) for x in set_strs or []]:
         if "=" not in item:
             die(f"--set expects key=value, got '{item}'")
         k, v = item.split("=", 1)
-        refuse_secrets(args.name, [k])
+        refuse_secrets(name, [k])
         set_nested(settings, k, coerce(v) if literal else v)
-    if settings:
-        toml_tables(settings, "settings", out)
-    return "\n".join(out) + "\n"
+    return settings
+
+
+def deep_merge(a, b):
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = deep_merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def seed_hermes_config(a):
+    """~/.hermes/config.yaml from model and settings, once. Hermes rewrites
+    the file at runtime, so an existing one is left alone. YAML is a superset
+    of JSON."""
+    path = os.path.join(a.home, ".hermes", "config.yaml")
+    if os.path.exists(path):
+        return False
+    cfg = {}
+    if a.data.get("model"):
+        cfg = {"model": {"default": a.data["model"]}}
+    cfg = deep_merge(cfg, a.data.get("settings") or {})
+    pw = pwd.getpwnam(a.user)
+    d = os.path.dirname(path)
+    os.makedirs(d, mode=0o750, exist_ok=True)
+    os.chown(d, pw.pw_uid, pw.pw_gid)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.chmod(path, 0o600)
+    os.chown(path, pw.pw_uid, pw.pw_gid)
+    return True
 
 
 # ----------------------------------------------------------------------------
-# rebuild (plain nixos-rebuild switch by default; agentctl adds nothing to it)
+# users, homes, limits
 # ----------------------------------------------------------------------------
-def rebuild_cmd(state):
-    return state["rebuildCommand"].replace("{action}", "switch")
+def create_user(state, a):
+    if user_exists(a.user):
+        return
+    run([
+        "useradd", "--system", "--user-group", "--no-create-home",
+        "--home-dir", a.home, "--shell", state["nologin"],
+        "--comment", f"agentfleet agent {a.name}", a.user,
+    ], capture=True)
 
 
-def rebuild(state):
-    cmd = rebuild_cmd(state)
-    print(f"==> {cmd}")
-    r = subprocess.run(cmd, shell=True)
-    if r.returncode != 0:
-        die(f"rebuild failed (exit {r.returncode}); the registry change is still on disk", r.returncode)
+def delete_user(a):
+    if user_exists(a.user):
+        run(["userdel", a.user], check=False, capture=True)
+    try:
+        grp.getgrnam(a.user)
+        run(["groupdel", a.user], check=False, capture=True)
+    except KeyError:
+        pass
 
 
-def removed_agents(state):
-    """Names that still have a home or state directory but are no longer
-    defined: removed with `rm` but not purged. They match the name regex so
-    stray directories are ignored."""
-    pattern = state.get("nameRegex", DEFAULT_NAME_REGEX)
-    found = set()
-    for base in (state["homeBase"], state["stateDir"]):
-        try:
-            entries = os.listdir(base)
-        except OSError:
-            continue
-        for n in entries:
-            if re.fullmatch(pattern, n) and os.path.isdir(os.path.join(base, n)):
-                found.add(n)
-    return sorted(found - set(state["agents"]))
+def create_home(a):
+    pw = pwd.getpwnam(a.user)
+    os.makedirs(a.home, mode=0o750, exist_ok=True)
+    os.chmod(a.home, 0o750)
+    os.chown(a.home, pw.pw_uid, pw.pw_gid)
+    os.makedirs(a.state_dir, mode=0o700, exist_ok=True)
+    os.chmod(a.state_dir, 0o700)
 
 
-def enabled_services(state):
-    return [a["service"] for _, a in sorted(state["agents"].items()) if a.get("service")]
+def apply_limits(a):
+    """MemoryMax/CPUQuota as a persistent per-instance drop-in."""
+    props = []
+    props.append(f"MemoryMax={a.data['memory_max'] if a.data.get('memory_max') else 'infinity'}")
+    props.append(f"CPUQuota={a.data['cpu_quota'] if a.data.get('cpu_quota') else ''}")
+    systemctl("set-property", a.unit, *props, check=False, capture=True)
 
 
 # ----------------------------------------------------------------------------
@@ -380,20 +428,24 @@ def enabled_services(state):
 # ----------------------------------------------------------------------------
 def cmd_names(state, args):
     """Used by shell completion."""
-    names = removed_agents(state) if args.removed else sorted(state["agents"])
+    agents = all_agents(state)
+    names = [n for n, a in agents.items() if (a.removed if args.removed else a.active)]
     print("\n".join(names))
 
 
 def cmd_list(state, args):
     rows = []
-    for name in sorted(state["agents"]):
-        a = state["agents"][name]
-        st = unit_state(a["service"]) if a.get("enabled", True) else "disabled"
-        rows.append((name, st, a.get("userId", ""), a.get("model") or "", a.get("description", "")))
-    for name in removed_agents(state):
-        rows.append((name, "removed", "", "", f"leftover files; `agentctl purge {name}` deletes them"))
+    for name, a in all_agents(state).items():
+        rec = matrix_record(state, name)
+        uid = rec.get("user_id") or f"@{a.data.get('localpart') or name}:{state['matrix']['serverName']}"
+        if a.removed:
+            rows.append((name, "removed", uid, a.data.get("model") or "", "files kept; `agentctl add` resumes, `agentctl purge` deletes"))
+        elif a.exists:
+            rows.append((name, unit_state(a.unit), uid, a.data.get("model") or "", a.data.get("description", "")))
+        else:
+            rows.append((name, "orphan", "", "", "directory without agent.json; `agentctl purge` deletes it"))
     if not rows:
-        print("no agents defined")
+        print("no agents")
         return
     hdr = ("NAME", "STATE", "MATRIX", "MODEL", "DESCRIPTION")
     widths = [max(len(str(r[i])) for r in rows + [hdr]) for i in range(4)]
@@ -407,215 +459,159 @@ def cmd_add(state, args):
     need_root()
     name = args.name
     valid_name(state, name)
-    if name in state["agents"]:
+    a = Agent(state, name)
+    if a.active:
         die(f"agent '{name}' already exists")
-    if not state["registry"]["enabled"]:
-        die("this host has no TOML registry (services.agentfleet.registry.dir is unset); define agents in Nix instead")
-    try:
-        pwd.getpwnam(f"{state['userPrefix']}{name}")
-        die(f"user {state['userPrefix']}{name} already exists on this host")
-    except KeyError:
-        pass
-
-    reg = state["registry"]["hostPath"]
-    path = os.path.join(reg, f"{name}.toml")
-    if os.path.exists(path):
-        die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
-    refuse_purged(state, name)
-
-    secrets = prompt_secrets(state, parse_kv(args.secret, "--secret", prompt=True), args.no_prompt)
-
-    os.makedirs(reg, exist_ok=True)
-    with open(path, "w") as f:
-        f.write(render_agent_toml(args))
-    print(f"wrote {path}")
-
-    flake = state["flakeDir"]
-    if in_git(flake):
-        # Flakes only see tracked files; an untracked registry entry is invisible.
-        git(flake, "add", path)
-        print("git: staged (commit when you are happy with it)")
-
-    if secrets:
-        secrets_path = os.path.join(state["stateDir"], name, "secrets.env")
-        write_env_file(secrets_path, secrets)
-        print(f"wrote {len(secrets)} secret(s) to {secrets_path}")
-
-    if args.no_rebuild:
-        print(f"skipping rebuild (--no-rebuild); run `{rebuild_cmd(state)}` when ready")
-        return
-    rebuild(state)
-    report_after_rebuild(state, name)
-
-
-def report_after_rebuild(state, name):
-    """The rebuild succeeded; say whether the agent actually runs. The new
-    state.json is in place now, so read it afresh."""
-    new = load_state()
-    a = new["agents"].get(name)
-    unit = (a or {}).get("service")
-    if unit and is_active(unit):
-        operator = new["matrix"]["operator"]
-        rec = {}
-        try:
-            with open(os.path.join(new["matrix"]["stateDir"], "agents", f"{name}.json")) as f:
-                rec = json.load(f)
-        except (OSError, ValueError):
-            pass
-        if rec.get("introduced_room"):
-            print(f"agent '{name}' is up and has invited {operator} to {rec['introduced_room']}. Accept the invite in your Matrix client.")
-        else:
-            warn(f"agent '{name}' is up, but its invitation to {operator} could not be delivered.")
-            warn("Run `agentctl matrix check` to see what is wrong with DNS, proxy or federation; the invite is retried on every rebuild and by `agentctl matrix introduce " + name + "`.")
-        print(f"Next: agentctl logs {name} -f")
-        return
-    synapse = new["matrix"]["synapseService"]
-    if not is_active(synapse):
-        warn(f"agent '{name}' is NOT running: the Matrix server ({synapse}) is down and the agents depend on it.")
-        warn(f"Inspect it with `agentctl matrix logs -n 50`; once it is up, run `agentctl start {name}`.")
-    else:
-        warn(f"agent '{name}' is NOT running ({unit_state(unit) if unit else 'no unit'}); see `agentctl logs {name}`.")
-    sys.exit(1)
-
-
-def matrix_record(state, name):
-    try:
-        with open(os.path.join(state["matrix"]["stateDir"], "agents", f"{name}.json")) as f:
-            return json.load(f)
-    except (OSError, ValueError, KeyError):
-        return {}
-
-
-def refuse_purged(state, name):
-    """A purged name is retired for good; say so before anything is written."""
-    rec = matrix_record(state, name)
-    if rec.get("state") in ("purged", "deactivated"):
+    if matrix_record(state, name).get("state") in ("purged", "deactivated"):
         die(f"the name '{name}' was purged (agentctl rm --purge) and can never be used again; pick another name")
+    resuming = a.removed
+    if not resuming and user_exists(a.user):
+        die(f"user {a.user} already exists on this host but is not an agent; remove it first")
+    if not resuming and os.path.exists(a.home):
+        die(f"{a.home} already exists; `agentctl purge {name}` removes leftovers")
+
+    env = parse_kv(args.env, "--env")
+    refuse_secrets(name, env)
+    settings = parse_settings(name, args.set, args.set_str)
+    provided = parse_kv(args.secret, "--secret", prompt=True)
+    secrets = provided if resuming else prompt_secrets(state, provided, args.no_prompt)
+
+    # agent.json: on resume, flags given now override what was there.
+    data = a.data if resuming else {"name": name, "created": int(time.time()), "localpart": name}
+    for key, val in (("model", args.model), ("description", args.description),
+                     ("memory_max", args.memory_max), ("cpu_quota", args.cpu_quota)):
+        if val is not None:
+            data[key] = val
+    data.setdefault("description", "")
+    if env:
+        data["environment"] = {**data.get("environment", {}), **env}
+    if settings:
+        data["settings"] = deep_merge(data.get("settings", {}), settings)
+    data["state"] = "active"
+    a.data = data
+
+    create_user(state, a)
+    create_home(a)
+    a.save()
+    write_env_file(a.environment_file, data.get("environment", {}), header="# Managed by agentctl: the agent's non-secret environment.")
+    if secrets or not os.path.exists(a.secrets_file):
+        write_env_file(a.secrets_file, {**read_env_file(a.secrets_file), **secrets})
+    if secrets:
+        print(f"wrote {len(secrets)} secret(s) to {a.secrets_file}")
+    if seed_hermes_config(a):
+        print(f"seeded {a.home}/.hermes/config.yaml")
+    apply_limits(a)
+    print(("resumed" if resuming else "created") + f" agent '{name}' ({a.user}, {a.home})")
+
+    # Matrix account, token, introduction. Failures here leave the agent in
+    # place without a token; `agentctl matrix introduce` finishes the job.
+    r = matrix_ctl(state, "provision", name, check=False)
+    if r.returncode != 0:
+        warn(f"Matrix provisioning failed; the agent is created but cannot start without its token. "
+             f"Check `agentctl matrix status` / `agentctl matrix check`, then `agentctl matrix introduce {name}` and `agentctl start {name}`.")
+        sys.exit(1)
+
+    if args.no_start:
+        print(f"not started (--no-start); `agentctl start {name}` when ready")
+        return
+    systemctl("start", a.unit)
+    report_started(state, a)
+
+
+def report_started(state, a):
+    time.sleep(1)
+    if not is_active(a.unit):
+        warn(f"agent '{a.name}' did not stay up ({unit_state(a.unit)}); see `agentctl logs {a.name}`")
+        sys.exit(1)
+    rec = matrix_record(state, a.name)
+    operator = state["matrix"]["operator"]
+    if rec.get("introduced_room"):
+        print(f"agent '{a.name}' is up and has invited {operator} to {rec['introduced_room']}. Accept the invite in your Matrix client.")
+    else:
+        warn(f"agent '{a.name}' is up, but its invitation to {operator} could not be delivered.")
+        warn(f"Run `agentctl matrix check` to see what is wrong; `agentctl matrix introduce {a.name}` retries the invite.")
+    print(f"Next: agentctl logs {a.name} -f")
 
 
 def cmd_rm(state, args):
     need_root()
-    path = os.path.join(state["registry"]["hostPath"], f"{args.name}.toml")
-    a = state["agents"].get(args.name)
-    if a is None:
-        if not os.path.exists(path):
-            die(f"no agent named '{args.name}' (see `agentctl list`)")
-        # Registered with --no-rebuild (or applied elsewhere) but not deployed here yet.
-        a = {
-            "source": "toml",
-            "home": os.path.join(state["homeBase"], args.name),
-            "stateDir": os.path.join(state["stateDir"], args.name),
-        }
-    if a.get("source") != "toml":
-        die(f"agent '{args.name}' is defined in Nix, not the registry; remove it from your configuration instead")
+    a = Agent(state, args.name)
+    leftovers = os.path.isdir(a.home) or os.path.isdir(a.state_dir)
+    if not a.exists and not (args.purge and leftovers):
+        die(f"no agent named '{args.name}' (see `agentctl list`)")
+    if a.removed and not args.purge:
+        die(f"agent '{args.name}' is already removed; `agentctl purge {args.name}` deletes what is left")
     if not args.yes:
         what = (
-            "and PURGE it: delete home, state and secrets, and retire the name for good"
+            "and PURGE it: delete home, state and secrets, leave its rooms, and retire the name for good"
             if args.purge
-            else "(home, state and Matrix account are kept; adding the same name later resumes it)"
+            else "(home, state and Matrix account are kept; `agentctl add` with the same name resumes it)"
         )
         if not confirm(f"Remove agent '{args.name}' {what}?"):
             die("aborted", 2)
 
-    for unit in (a.get("service"), a.get("initService")):
-        if unit and is_active(unit):
-            systemctl("stop", unit, check=False)
+    if is_active(a.unit):
+        systemctl("stop", a.unit)
+        print(f"stopped {a.unit}")
 
-    flake = state["flakeDir"]
-    if os.path.exists(path):
-        if in_git(flake) and git_tracked(flake, path):
-            git(flake, "rm", "-q", "-f", path)
-        else:
-            os.remove(path)
-        print(f"removed {path}")
-    else:
-        warn(f"{path} was already gone")
+    if not args.purge:
+        a.data["state"] = "removed"
+        a.data["removed"] = int(time.time())
+        a.save()
+        matrix_ctl(state, "lock", args.name, check=False)
+        print(f"agent '{args.name}' removed; its files and Matrix account are kept")
+        return
 
-    if not args.no_rebuild:
-        rebuild(state)
-
-    if args.purge:
-        # The rebuild above locked the account; purge retires the name.
-        purge_leftovers(state, args.name, retire=not args.no_rebuild)
-    elif os.path.isdir(a.get("home") or ""):
-        warn(
-            f"{a['home']} was kept. Its files still belong to the freed UID, which a "
-            f"future agent may receive; `agentctl purge {args.name}` deletes them"
-        )
-    print(f"agent '{args.name}' removed")
-
-
-def purge_leftovers(state, name, retire=True):
-    for p in (os.path.join(state["homeBase"], name), os.path.join(state["stateDir"], name)):
+    for p in (a.home, a.state_dir):
         if os.path.isdir(p):
             shutil.rmtree(p)
-            print(f"purged {p}")
-    if retire:
-        r = run([state["matrix"]["ctl"], "purge", name], check=False, capture=True)
-        out = (r.stdout + r.stderr).strip()
-        if r.returncode != 0 and "no Matrix record" in out:
-            print(f"no Matrix account to retire for '{name}'")
-        elif out:
-            print(out)
+            print(f"deleted {p}")
+    delete_user(a)
+    systemctl("revert", a.unit, check=False, capture=True)  # drop the limits drop-in
+    r = matrix_ctl(state, "purge", args.name, check=False, capture=True)
+    out = (r.stdout + r.stderr).strip()
+    if out:
+        print(out)
+    print(f"agent '{args.name}' purged; the name can never be used again")
 
 
 def cmd_purge(state, args):
-    need_root()
-    valid_name(state, args.name)
-    if args.name in state["agents"]:
-        die(f"agent '{args.name}' is still defined; use `agentctl rm {args.name} --purge`")
-    toml = os.path.join(state["registry"]["hostPath"], f"{args.name}.toml")
-    if os.path.exists(toml):
-        die(f"{toml} still exists; remove it with `agentctl rm {args.name} --purge`")
-    if args.name not in removed_agents(state):
-        print(f"nothing left on disk for '{args.name}'; retiring its Matrix name if it has one")
-    elif not args.yes and not confirm(f"Delete home, state and secrets of removed agent '{args.name}' and retire the name for good?"):
-        die("aborted", 2)
-    purge_leftovers(state, args.name)
-    print(f"agent '{args.name}' purged")
+    args.purge = True
+    cmd_rm(state, args)
 
 
-def service_or_die(a, name):
-    unit = a.get("service")
-    if not unit:
-        die(f"agent '{name}' is disabled; set enable = true in its registry file and rebuild")
-    return unit
+def active_units(state):
+    return [a.unit for a in all_agents(state).values() if a.active]
 
 
 def cmd_lifecycle(state, args):
     need_root()
     if args.all:
-        units = enabled_services(state)
+        units = active_units(state)
         if not units:
-            die("no enabled agents")
+            if not args.quiet:
+                print("no agents")
+            return
         systemctl(args.command, *units)
-        print(f"{args.command}ed {len(units)} agent(s)" if args.command != "stop" else f"stopped {len(units)} agent(s)")
+        if not args.quiet:
+            print(f"{args.command}: {len(units)} agent(s)")
         return
     if not args.name:
         die(f"agentctl {args.command}: give an agent name or --all")
     a = get_agent(state, args.name)
-    systemctl(args.command, service_or_die(a, args.name))
+    systemctl(args.command, a.unit)
 
 
 def cmd_status(state, args):
     if not args.name:
         return cmd_list(state, args)
     a = get_agent(state, args.name)
-    units = [u for u in (a.get("service"), a.get("initService")) if u]
-    if not units:
-        print(f"{args.name}: disabled, no units")
-        return
-    systemctl("status", "--no-pager", "--lines=0", *units, check=False)
+    systemctl("status", "--no-pager", "--lines=0", a.unit, check=False)
 
 
 def cmd_logs(state, args):
-    a = get_agent(state, args.name)
-    units = [u for u in (a.get("service"), a.get("initService")) if u]
-    if not units:
-        die(f"agent '{args.name}' is disabled; nothing is logged under a unit")
-    cmd = ["journalctl", "--no-pager" if not args.follow else "-f", "-n", str(args.lines)]
-    for u in units:
-        cmd += ["-u", u]
+    a = get_agent(state, args.name, allow_removed=True)
+    cmd = ["journalctl", "-f" if args.follow else "--no-pager", "-n", str(args.lines), "-u", a.unit]
     os.execvp("journalctl", cmd)
 
 
@@ -632,14 +628,14 @@ def cmd_matrix(state, args):
     if sub == "stop":
         # Agents require the server; systemd stops them with it.
         systemctl("stop", synapse)
-        print(f"stopped {synapse} and, with it, the reconciler and every agent")
+        print(f"stopped {synapse} and, with it, every agent")
     elif sub == "start":
-        systemctl("start", synapse, reconcile, *enabled_services(state))
-        print(f"started {synapse}, {reconcile} and every enabled agent")
+        systemctl("start", synapse, reconcile, *active_units(state))
+        print(f"started {synapse}, {reconcile} and every agent")
     elif sub == "restart":
-        # Restart propagates through Requires= to the reconciler and the agents.
+        # Restart propagates through Requires= to the agents.
         systemctl("restart", synapse)
-        print(f"restarted {synapse}; the reconciler and the agents followed")
+        print(f"restarted {synapse}; the agents followed")
     elif sub == "logs":
         cmd = ["journalctl", "-f" if args.follow else "--no-pager", "-n", str(args.lines), "-u", synapse, "-u", reconcile]
         os.execvp("journalctl", cmd)
@@ -647,8 +643,8 @@ def cmd_matrix(state, args):
 
 def cmd_secrets(state, args):
     need_root()
-    a = get_agent(state, args.name)
-    path = a["secretsFile"]
+    a = get_agent(state, args.name, allow_removed=True)
+    path = a.secrets_file
     if args.sub == "list":
         keys = sorted(read_env_file(path))
         print("\n".join(keys) if keys else f"(no secrets in {path})")
@@ -674,10 +670,9 @@ def cmd_secrets(state, args):
             print(f"updated {path}")
         finally:
             os.remove(tmp)
-    unit = a.get("service")
-    if unit and is_active(unit):
-        systemctl("restart", unit)
-        print(f"restarted {unit}")
+    if is_active(a.unit):
+        systemctl("restart", a.unit)
+        print(f"restarted {a.unit}")
 
 
 # ----------------------------------------------------------------------------
@@ -686,8 +681,8 @@ def cmd_secrets(state, args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="agentctl",
-        description="Manage the Hermes agents on this host. Each agent is its own Unix user with its own Matrix account.",
-        epilog="State comes from %s (override with $AGENTCTL_STATE)." % STATE_PATH,
+        description="Create, run and destroy the Hermes agents on this host. Each agent is its own Unix user with its own Matrix account.",
+        epilog="Host facts come from %s (override with $AGENTCTL_STATE)." % STATE_PATH,
     )
     sub = p.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
@@ -699,29 +694,31 @@ def build_parser():
     s.add_argument("--removed", action="store_true")
     s.set_defaults(func=cmd_names)
 
-    s = sub.add_parser("add", help="create an agent and rebuild", description="Create an agent: write <registry>/<name>.toml, store its provider key, rebuild the host. It then introduces itself to you on Matrix.")
+    s = sub.add_parser(
+        "add",
+        help="create an agent and start it",
+        description="Create an agent: system user, home, secrets, Matrix account, then start it. It introduces itself to you on Matrix. Running `add` for an agent removed with `rm` resumes it.",
+    )
     s.add_argument("name")
     s.add_argument("--model", help="Hermes model id, e.g. anthropic/claude-sonnet-5.5")
     s.add_argument("--description", help="free text shown in `agentctl list` and in the introduction")
     s.add_argument("--memory-max", metavar="SIZE", help="systemd MemoryMax, e.g. 4G")
     s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%")
-    s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")
     s.add_argument("--env", action="append", metavar="K=V", help="non-secret environment variable (repeatable)")
-    s.add_argument("--set", action="append", metavar="KEY=VAL", help="Hermes config.yaml key, dotted keys allowed; integers and true/false become TOML literals (repeatable)")
+    s.add_argument("--set", action="append", metavar="KEY=VAL", help="Hermes config.yaml key, dotted; integers and true/false become literals (repeatable)")
     s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value is always a string")
     s.add_argument("--secret", action="append", metavar="KEY[=VALUE]", help="a key to store; without =VALUE you are prompted for it, which keeps it out of the shell history (repeatable)")
-    s.add_argument("--no-prompt", action="store_true", help="never prompt for secrets")
-    s.add_argument("--no-rebuild", action="store_true", help="write the registry entry but do not rebuild the host")
+    s.add_argument("--no-prompt", action="store_true", help="never prompt for the well-known provider keys")
+    s.add_argument("--no-start", action="store_true", help="create everything but do not start the agent")
     s.set_defaults(func=cmd_add)
 
-    s = sub.add_parser("rm", help="remove an agent and rebuild; its Matrix account is locked")
+    s = sub.add_parser("rm", help="stop and remove an agent; files and Matrix account are kept unless --purge")
     s.add_argument("name")
-    s.add_argument("--purge", action="store_true", help="also delete home, state and secrets, and retire the name for good (it can never be used again)")
+    s.add_argument("--purge", action="store_true", help="delete home, state and secrets, leave its rooms, and retire the name for good")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
-    s.add_argument("--no-rebuild", action="store_true", help="remove the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_rm)
 
-    s = sub.add_parser("purge", help="for an agent removed without --purge: delete what was left behind and retire the name for good")
+    s = sub.add_parser("purge", help="same as `rm --purge`; also for an agent removed earlier without it")
     s.add_argument("name")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
     s.set_defaults(func=cmd_purge)
@@ -729,7 +726,8 @@ def build_parser():
     for name, help_ in (("start", "start an agent, or all with --all"), ("stop", "stop an agent, or all with --all"), ("restart", "restart an agent, or all with --all")):
         s = sub.add_parser(name, help=help_)
         s.add_argument("name", nargs="?")
-        s.add_argument("--all", action="store_true", help="every enabled agent")
+        s.add_argument("--all", action="store_true", help="every agent")
+        s.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
         s.set_defaults(func=cmd_lifecycle)
 
     s = sub.add_parser("status", help="service status for one agent, or a table for all")
@@ -754,15 +752,15 @@ def build_parser():
     x.add_argument("name")
     x = ms.add_parser("rotate-token", help="log the agent out everywhere and issue it a new token")
     x.add_argument("name")
-    ms.add_parser("start", help="start Synapse, the reconciler and every enabled agent")
-    ms.add_parser("stop", help="stop Synapse; the reconciler and every agent stop with it")
-    ms.add_parser("restart", help="restart Synapse; the reconciler and every agent restart with it")
+    ms.add_parser("start", help="start Synapse, the reconciler and every agent")
+    ms.add_parser("stop", help="stop Synapse; every agent stops with it")
+    ms.add_parser("restart", help="restart Synapse; every agent restarts with it")
     x = ms.add_parser("logs", help="journal of Synapse and the reconciler")
     x.add_argument("-f", "--follow", action="store_true")
     x.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_matrix)
 
-    s = sub.add_parser("secrets", help="manage the agent's provider keys")
+    s = sub.add_parser("secrets", help="manage an agent's provider keys")
     ss = s.add_subparsers(dest="sub", metavar="<set|edit|list>")
     ss.required = True
     x = ss.add_parser("set", help="create or update secrets; a bare KEY is prompted for; restarts a running agent")

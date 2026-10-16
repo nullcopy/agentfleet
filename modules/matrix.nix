@@ -2,12 +2,14 @@
 #
 # Synapse runs with Postgres, speaking plain HTTP on loopback (for the agents)
 # and optionally on a private address (for a reverse proxy on another
-# machine). A root-side reconciler, agentfleet-matrix, runs after every
-# activation and gives each agent an account and a fresh access token, sends
-# a one-time introduction DM to the operator, and locks the accounts of
-# removed agents. Only federation with the operator's homeserver needs the
-# server to be reachable from outside: TLS, the four routes and .well-known
-# are the reverse proxy's job (see docs/install.md).
+# machine). A root-side reconciler, agentfleet-matrix, reads the agents that
+# agentctl created under /var/lib/agents, gives each an account and an access
+# token, sends a one-time introduction DM to the operator, and locks the
+# accounts of removed agents. agentctl calls it directly on add/rm; the unit
+# here runs it once at boot as a safety net. Only federation with the
+# operator's homeserver needs the server to be reachable from outside: TLS,
+# the four routes and .well-known are the reverse proxy's job (see
+# docs/install.md).
 {
   config,
   lib,
@@ -23,7 +25,6 @@ let
     mkOption
     mkIf
     types
-    mapAttrs
     ;
 
   stateDir = m.stateDir;
@@ -55,16 +56,8 @@ let
     inherit stateDir;
     adminLocalpart = "agentfleet";
     hostName = config.networking.hostName;
-    agents = mapAttrs (_: ag: {
-      inherit (ag)
-        localpart
-        userId
-        model
-        description
-        service
-        ;
-      envFile = ag.matrixEnvFile;
-    }) cfg.resolvedAgents;
+    agentsDir = "/var/lib/agents";
+    unitTemplate = "agent@%s.service";
   };
 in
 {
@@ -176,7 +169,6 @@ in
         "matrix-synapse.service"
       ];
       requires = [ "matrix-synapse.service" ];
-      restartTriggers = [ spec ];
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
