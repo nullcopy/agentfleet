@@ -106,10 +106,15 @@ step with it:
    locked, lifts Synapse's message rate limit, sets a fresh password, logs in
    with the fixed device id `AGENTFLEET`, and writes the token to
    `matrix.env`. A running agent is restarted when its token changed.
-3. Sends the introduction once: a private room created by the agent, the
-   operator invited, one message naming the agent, its model and description.
-   If the invite cannot be delivered yet (federation not working), it is
-   retried on every run and by `agentctl matrix introduce <name>`.
+3. Sends the introduction once, in two halves. The local half, done
+   immediately: a private room created by the agent, the greeting posted in
+   it, and the room marked as a DM. The federated half: inviting the
+   operator, which makes Synapse contact the operator's homeserver and only
+   works once federation works in both directions. Until then the invite is
+   retried on every run and by `agentctl matrix introduce <name>`, always in
+   the same room, so you never receive more than one invite per agent.
+   A failure here, or anything else that goes wrong for one agent, is logged
+   and does not fail the unit or affect other agents.
 4. Locks the account and logs out every device of any agent it provisioned
    earlier that is no longer declared.
 

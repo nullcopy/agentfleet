@@ -256,12 +256,20 @@ class Synapse:
         self.a("POST", f"/_synapse/admin/v1/deactivate/{quote(uid)}", {"erase": False})
 
     # -- as the agent ----------------------------------------------------------
-    def introduce(self, token, uid, operator, text, html):
-        room = api(self.base, "POST", "/_matrix/client/v3/createRoom", {
+    def create_dm_room(self, token):
+        """A private room, no invite yet: that part can block on federation."""
+        return api(self.base, "POST", "/_matrix/client/v3/createRoom", {
             "preset": "trusted_private_chat",
             "is_direct": True,
-            "invite": [operator],
         }, token=token)["room_id"]
+
+    def send_text(self, token, room, text, html):
+        api(self.base, "PUT", f"/_matrix/client/v3/rooms/{quote(room)}/send/m.room.message/{secrets.token_hex(8)}", {
+            "msgtype": "m.text", "body": text,
+            "format": "org.matrix.custom.html", "formatted_body": html,
+        }, token=token)
+
+    def mark_direct(self, token, uid, operator, room):
         try:
             direct = api(self.base, "GET", f"/_matrix/client/v3/user/{quote(uid)}/account_data/m.direct", token=token)
         except ApiError as e:
@@ -272,11 +280,12 @@ class Synapse:
         if room not in direct[operator]:
             direct[operator].append(room)
         api(self.base, "PUT", f"/_matrix/client/v3/user/{quote(uid)}/account_data/m.direct", direct, token=token)
-        api(self.base, "PUT", f"/_matrix/client/v3/rooms/{quote(room)}/send/m.room.message/{secrets.token_hex(8)}", {
-            "msgtype": "m.text", "body": text,
-            "format": "org.matrix.custom.html", "formatted_body": html,
-        }, token=token)
-        return room
+
+    def invite(self, token, room, operator):
+        """Inviting a user on another homeserver makes Synapse talk to that
+        server synchronously, which can take long or fail until federation
+        works in both directions."""
+        api(self.base, "POST", f"/_matrix/client/v3/rooms/{quote(room)}/invite", {"user_id": operator}, token=token, timeout=90)
 
 
 # ----------------------------------------------------------------------------
@@ -329,17 +338,41 @@ def provision(syn, spec, name, a, rec, force_token=False):
             subprocess.run(["systemctl", "restart", a["service"]], check=False)
             log(f"{name}: restarted {a['service']}")
     if not rec.get("introduced_room"):
-        token = read_token(a["envFile"])
-        text, html = intro_message(spec, name, a)
-        try:
-            room = syn.introduce(token, uid, spec["operator"], text, html)
-        except ApiError as e:
-            log(f"{name}: could not introduce to {spec['operator']} yet ({e.errcode or e.status}); will retry next run. "
-                f"If the operator is on another homeserver, federation must be working.")
-            return
-        rec.update({"introduced_room": room, "introduced_at": int(time.time())})
+        introduce(syn, spec, name, a, rec)
+
+
+def introduce(syn, spec, name, a, rec, resend=False):
+    """Create the DM room and post the greeting (local, quick), then invite
+    the operator (federation, may fail). The room is kept across retries so
+    the operator does not end up with a pile of invites."""
+    uid, operator = a["userId"], spec["operator"]
+    token = read_token(a["envFile"])
+    text, html = intro_message(spec, name, a)
+    room = rec.get("intro_room")
+    if not room:
+        room = syn.create_dm_room(token)
+        syn.send_text(token, room, text, html)
+        syn.mark_direct(token, uid, operator, room)
+        rec["intro_room"] = room
         write_json(record_path(spec, name), rec)
-        log(f"{name}: introduced to {spec['operator']} in {room}")
+    elif resend:
+        syn.send_text(token, room, text, html)
+    try:
+        syn.invite(token, room, operator)
+    except ApiError as e:
+        if not (e.status == 403 and "already in the room" in e.body):
+            log(f"{name}: could not invite {operator} to {room} yet ({e.errcode or e.status}); will retry on the next run or "
+                f"`agentctl matrix introduce {name}`. Federation with {operator.split(':', 1)[1]} must work in both "
+                f"directions: check https://federationtester.matrix.org/ for {spec['serverName']}.")
+            return
+    except Exception as e:  # timeouts, connection errors: all retryable
+        log(f"{name}: could not invite {operator} to {room} yet ({type(e).__name__}); will retry on the next run or "
+            f"`agentctl matrix introduce {name}`. Federation with {operator.split(':', 1)[1]} must work in both "
+            f"directions: check https://federationtester.matrix.org/ for {spec['serverName']}.")
+        return
+    rec.update({"introduced_room": room, "introduced_at": int(time.time())})
+    write_json(record_path(spec, name), rec)
+    log(f"{name}: introduced to {operator} in {room}")
 
 
 def read_token(env_file):
@@ -356,15 +389,29 @@ def cmd_reconcile(spec, args):
     syn = Synapse(spec)
     syn.ensure_admin()
     records = all_records(spec)
+    failed = []
+    # One agent's trouble must not take the unit, and with it every other
+    # agent, down: log and carry on. Only an unreachable homeserver or a
+    # failed admin bootstrap above are fatal.
     for name, a in sorted(spec["agents"].items()):
-        provision(syn, spec, name, a, records.get(name, {}))
+        try:
+            provision(syn, spec, name, a, records.get(name, {}))
+        except Exception as e:
+            failed.append(name)
+            log(f"{name}: provisioning failed ({type(e).__name__}: {e}); will retry on the next run")
     for name, rec in records.items():
         if name in spec["agents"] or rec.get("state") != "active":
             continue
-        syn.lock(rec["user_id"])
+        try:
+            syn.lock(rec["user_id"])
+        except Exception as e:
+            log(f"{name}: could not lock {rec['user_id']} ({type(e).__name__}: {e}); will retry on the next run")
+            continue
         rec["state"] = "locked"
         write_json(record_path(spec, name), rec)
         log(f"{name}: agent gone, locked {rec['user_id']} and logged out its devices")
+    if failed:
+        log(f"{len(failed)} agent(s) not fully provisioned: {', '.join(failed)}")
 
 
 def cmd_status(spec, args):
@@ -400,8 +447,11 @@ def cmd_introduce(spec, args):
     syn = Synapse(spec)
     syn.ensure_admin()
     rec = read_json(record_path(spec, args.name), {})
+    if rec.get("state") != "active" or not os.path.exists(a["envFile"]):
+        provision(syn, spec, args.name, a, rec)
+        rec = read_json(record_path(spec, args.name), {})
     rec.pop("introduced_room", None)
-    provision(syn, spec, args.name, a, rec)
+    introduce(syn, spec, args.name, a, rec, resend=True)
 
 
 def cmd_rotate(spec, args):
