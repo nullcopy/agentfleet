@@ -23,7 +23,7 @@ MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.example.org"
 [settings]                             # Hermes config.yaml keys, seeded on first start
 
 [matrix]
-localpart = "scout2"                   # only if @scout was deactivated earlier
+localpart = "scribe"                   # Matrix id other than the agent name; rarely needed
 ```
 
 `agentctl add` writes this file from its flags; see [agentctl](agentctl.md)
@@ -126,7 +126,6 @@ agentctl matrix status                 homeserver, admin, per-agent account stat
 agentctl matrix check                  DNS, TLS, proxy routes, .well-known, federation, from the host (no root)
 agentctl matrix introduce <name>       resend the introduction DM
 agentctl matrix rotate-token <name>    log out every session, issue a new token, restart the agent
-agentctl matrix deactivate <name>      after `agentctl rm`: deactivate the account for good
 agentctl matrix start|stop|restart     Synapse, and with it the reconciler and every agent
 agentctl matrix logs [-f]              journal of Synapse and the reconciler
 ```
@@ -135,8 +134,12 @@ Each is described in [agentctl](agentctl.md).
 
 Removal: `agentctl rm scout` locks `@scout:<serverName>` and logs it out;
 adding `scout` again unlocks the same account. `agentctl rm scout --purge`
-additionally deactivates it, which Synapse makes permanent, so a later
-`scout` needs `[matrix] localpart = "scout2"`.
+(or `agentctl purge scout` later) additionally makes the account leave every
+room and records the name as purged: the reconciler refuses to ever
+provision `scout` again and `agentctl add scout` refuses up front. The
+locked account stays on the homeserver; Synapse's own deactivation is not
+used, since locking is permanent enough and reversible by hand if ever
+needed.
 
 State lives in `/var/lib/agentfleet/matrix/` (shared secret, admin token, one
 JSON record per agent) and is root-only.

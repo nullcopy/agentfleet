@@ -15,7 +15,7 @@ agentctl start|stop|restart <name> | --all
 agentctl status [<name>]
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name> ...
-agentctl matrix [status|check|introduce <name>|rotate-token <name>|deactivate <name>|start|stop|restart|logs]
+agentctl matrix [status|check|introduce <name>|rotate-token <name>|start|stop|restart|logs]
 ```
 
 ## Agents
@@ -34,7 +34,6 @@ it points you at `matrix check`.
 | --- | --- |
 | `--model M` | Hermes model id, e.g. `anthropic/claude-sonnet-5.5` |
 | `--description TEXT` | shown by `list` and in the introduction DM |
-| `--localpart L` | Matrix id `@L:<server>` instead of `@<name>:<server>`. Required to reuse the name of an agent that was removed with `--purge`, because Synapse never reuses a deactivated id; `add` refuses such a name up front and suggests this |
 | `--memory-max SIZE`, `--cpu-quota PCT` | systemd `MemoryMax` / `CPUQuota` |
 | `--package PKG` | extra nixpkgs package on the agent's PATH, repeatable |
 | `--env K=V` | non-secret environment variable, repeatable |
@@ -45,15 +44,14 @@ it points you at `matrix check`.
 
 **`rm <name>`** stops the agent, removes its registry file, rebuilds. The
 Matrix account is locked and the home, state and secrets stay on disk, so a
-later `add` with the same name resumes where it left off. With `--purge` the
-files are deleted and the Matrix account is deactivated for good: Synapse
-never reuses an id, so a future agent with that name needs
-`[matrix] localpart = "<name>2"`. Nix-defined agents cannot be removed here.
+later `add` with the same name resumes where it left off: same account, same
+DM room, same memory. With `--purge` the files are deleted, the account
+leaves every room, is logged out and locked, and the name is retired: no
+agent of that name can ever be created again, on purpose. Nix-defined agents
+cannot be removed here.
 
 **`purge <name>`** does the `--purge` part for an agent that was removed
-earlier without it: deletes `/srv/agents/<name>` and
-`/var/lib/agents/<name>` and deactivates the account. Refuses while the
-agent is still defined.
+earlier without it. Refuses while the agent is still defined.
 
 **`start`, `stop`, `restart`** act on one agent's service, or on every
 enabled agent with `--all`.
@@ -86,10 +84,9 @@ service requires both, so stopping the server stops the agents.
 | subcommand | what it does |
 | --- | --- |
 | `matrix check` | no root needed. Verifies from the host that the internet can reach the server: Synapse locally, DNS, HTTPS and the proxy routes, that the proxy forwards to this Synapse, both `.well-known` documents, outbound federation to the operator's homeserver, and the Matrix Federation Tester's view from outside. Prints `OK`/`FAIL` per item with a hint and exits non-zero on any failure. Run it before creating the first agent and whenever an introduction does not arrive |
-| `matrix` or `matrix status` | is the homeserver up, which admin account bootstrapped it, who the operator is, and one row per agent account: `pending` (not yet provisioned), `active`, `locked` (removed with `rm`), `deactivated` (purged), plus the id of the introduction room |
+| `matrix` or `matrix status` | is the homeserver up, which admin account bootstrapped it, who the operator is, and one row per agent account: `pending` (not yet provisioned), `active`, `locked` (removed with `rm`), `purged` (name retired), plus the id of the introduction room |
 | `matrix introduce <name>` | send the introduction DM again, for example after federation started working |
 | `matrix rotate-token <name>` | log the agent out of every session and issue a fresh token; the agent restarts with it. Use when a token may have leaked |
-| `matrix deactivate <name>` | permanently deactivate the account of an agent that was removed. `purge` does this for you |
 | `matrix stop` | stop Synapse. The reconciler and every agent stop with it |
 | `matrix start` | start Synapse, the reconciler and every enabled agent |
 | `matrix restart` | restart Synapse; systemd restarts the reconciler and the agents after it |

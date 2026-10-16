@@ -215,9 +215,7 @@ class Synapse:
         info = self.get_user(uid)
         if info and info.get("deactivated"):
             raise ProvisionError(
-                f"{uid} was deactivated by an earlier `agentctl rm --purge`; Synapse never reuses such ids. "
-                f"Give this agent another Matrix id: `[matrix] localpart = \"<name>2\"` in its registry file "
-                f"(agentctl add --localpart), then rebuild"
+                f"{uid} is deactivated on the homeserver and cannot be used again; pick another agent name"
             )
         password = secrets.token_urlsafe(32)
         body = {"password": password, "logout_devices": False}
@@ -257,11 +255,20 @@ class Synapse:
         self.a("PUT", f"/_synapse/admin/v2/users/{quote(uid)}", {"locked": True})
         self.logout_everything(uid)
 
-    def deactivate(self, uid):
+    def leave_all_rooms(self, uid):
+        """Leave and forget every room, acting as the user via the admin
+        login API, so the operator is not left with a dead member in DMs."""
         if self.get_user(uid) is None:
-            log(f"warning: {uid} does not exist on the homeserver; nothing to deactivate")
-            return
-        self.a("POST", f"/_synapse/admin/v1/deactivate/{quote(uid)}", {"erase": False})
+            return 0
+        tok = self.a("POST", f"/_synapse/admin/v1/users/{quote(uid)}/login", {})["access_token"]
+        rooms = api(self.base, "GET", "/_matrix/client/v3/joined_rooms", token=tok).get("joined_rooms", [])
+        for room in rooms:
+            try:
+                api(self.base, "POST", f"/_matrix/client/v3/rooms/{quote(room)}/leave", {}, token=tok)
+                api(self.base, "POST", f"/_matrix/client/v3/rooms/{quote(room)}/forget", {}, token=tok)
+            except ApiError as e:
+                log(f"warning: {uid} could not leave {room}: {e}")
+        return len(rooms)
 
     # -- as the agent ----------------------------------------------------------
     def create_dm_room(self, token):
@@ -334,6 +341,11 @@ def service_active(unit):
 
 def provision(syn, spec, name, a, rec, force_token=False):
     uid = a["userId"]
+    if rec.get("state") in ("purged", "deactivated"):
+        raise ProvisionError(
+            f"the name '{name}' was purged (agentctl rm --purge) and can never be used again; "
+            f"remove this agent and create it under another name"
+        )
     have_env = os.path.exists(a["envFile"])
     fresh = rec.get("state") != "active" or rec.get("user_id") != uid or not have_env or force_token
     if fresh:
@@ -625,21 +637,26 @@ def cmd_rotate(spec, args):
     provision(syn, spec, args.name, a, rec, force_token=True)
 
 
-def cmd_deactivate(spec, args):
+def cmd_purge(spec, args):
+    """Retire a removed agent's Matrix name for good: leave every room, log
+    out everywhere, lock the account, and remember the name as purged so it
+    is never provisioned again. The account itself stays on the homeserver,
+    locked, because Synapse offers nothing cleaner that is also permanent."""
     if args.name in spec["agents"]:
-        die(f"agent '{args.name}' still exists; remove it first (agentctl rm)")
+        die(f"agent '{args.name}' still exists; remove it first (agentctl rm --purge)")
     rec = read_json(record_path(spec, args.name))
     if not rec:
         die(f"no Matrix record for '{args.name}'")
-    if rec.get("state") == "deactivated":
-        print(f"{rec['user_id']} already deactivated")
+    if rec.get("state") == "purged":
+        print(f"{rec['user_id']} already purged")
         return
     syn = Synapse(spec)
     syn.ensure_admin()
-    syn.deactivate(rec["user_id"])
-    rec["state"] = "deactivated"
-    write_json(record_path(spec, args.name), rec)
-    log(f"deactivated {rec['user_id']} (this id can never be registered again)")
+    uid = rec["user_id"]
+    left = syn.leave_all_rooms(uid)
+    syn.lock(uid)
+    write_json(record_path(spec, args.name), {"user_id": uid, "state": "purged", "purged_at": int(time.time())})
+    log(f"purged {uid}: left {left} room(s), logged out, locked; the name '{args.name}' can never be used again")
 
 
 def main():
@@ -655,9 +672,9 @@ def main():
     s = sub.add_parser("rotate-token", help="log out every session of the agent and issue a new token")
     s.add_argument("name")
     s.set_defaults(func=cmd_rotate)
-    s = sub.add_parser("deactivate", help="permanently deactivate a removed agent's account")
+    s = sub.add_parser("purge", help="retire a removed agent's Matrix name for good: leave rooms, lock, never reuse")
     s.add_argument("name")
-    s.set_defaults(func=cmd_deactivate)
+    s.set_defaults(func=cmd_purge)
     args = p.parse_args()
     if os.geteuid() != 0 and args.func is not cmd_check:
         die("must run as root")

@@ -39,11 +39,11 @@ What agentfleet is, in five points:
 ```
 agentctl list                      agents, state, Matrix id, model
 agentctl add <name> [--model M]    create an agent: registry file, provider key, rebuild
-agentctl rm <name> [--purge]       remove it; --purge also deletes home, state, secrets and the Matrix account
+agentctl rm <name> [--purge]       remove it; --purge also deletes home, state, secrets and retires the name
 agentctl purge <name>              delete what an earlier rm left behind
 agentctl start|stop|restart <name> | --all
 agentctl status [name]
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name>
-agentctl matrix [status|check|introduce|rotate-token|deactivate|start|stop|restart|logs]
+agentctl matrix [status|check|introduce|rotate-token|start|stop|restart|logs]
 ```

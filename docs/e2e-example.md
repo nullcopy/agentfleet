@@ -101,20 +101,21 @@ homes, their tokens, or yours.
 
 ```
 $ sudo agentctl rm scout --purge
-Remove agent 'scout' and PURGE its home, state and secrets? [y/N] y
+Remove agent 'scout' and PURGE it: delete home, state and secrets, and retire the name for good? [y/N] y
 removed /etc/nixos/agents/scout.toml
 ==> nixos-rebuild switch --flake /etc/nixos
 agentfleet-matrix: scout: agent gone, locked @scout:matrix.example.org and logged out its devices
 purged /srv/agents/scout
 purged /var/lib/agents/scout
-agentfleet-matrix: deactivated @scout:matrix.example.org (this id can never be registered again)
+agentfleet-matrix: purged @scout:matrix.example.org: left 1 room(s), logged out, locked; the name 'scout' can never be used again
 agent 'scout' removed
 ```
 
-Without `--purge` the home, state and Matrix account are kept and the account
-merely locked; a later `agentctl add scout` unlocks it and the old DM room is
-still there. With `--purge` the account is deactivated, which Synapse makes
-permanent; a future `scout` needs a new Matrix id, which is what
-`agentctl add scout --localpart scout2 ...` does (it writes
-`[matrix] localpart = "scout2"` to the registry file). `agentctl add scout`
-without it refuses and tells you so.
+Two kinds of removal, pick deliberately:
+
+- **`rm scout`** keeps the home, the state and the Matrix account, merely
+  locked. A later `agentctl add scout` unlocks it and the agent is back with
+  its memory and its old DM room.
+- **`rm scout --purge`** deletes everything on the host, makes the account
+  leave every room and retires the name: `scout` can never be created again.
+  Use it for agents you are done with.

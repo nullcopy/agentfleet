@@ -15,9 +15,9 @@ _agentctl() {
     local names="" opts=""
     case $cmd in
         add)
-            opts="--model --description --localpart --memory-max --cpu-quota --package --env --set --set-str --secret --no-prompt --no-rebuild"
+            opts="--model --description --memory-max --cpu-quota --package --env --set --set-str --secret --no-prompt --no-rebuild"
             case $prev in
-                --model|--description|--localpart|--memory-max|--cpu-quota|--package|--env|--set|--set-str|--secret) return ;;
+                --model|--description|--memory-max|--cpu-quota|--package|--env|--set|--set-str|--secret) return ;;
             esac
             ;;
         rm)
@@ -46,12 +46,11 @@ _agentctl() {
             ;;
         matrix)
             if (( cword == 2 )); then
-                COMPREPLY=($(compgen -W "status check introduce rotate-token deactivate start stop restart logs" -- "$cur"))
+                COMPREPLY=($(compgen -W "status check introduce rotate-token start stop restart logs" -- "$cur"))
                 return
             fi
             case ${COMP_WORDS[2]} in
                 introduce|rotate-token) (( cword == 3 )) && names=$(agentctl names 2>/dev/null) ;;
-                deactivate) (( cword == 3 )) && names=$(agentctl names --removed 2>/dev/null) ;;
                 logs) opts="-f --follow -n --lines" ;;
             esac
             ;;

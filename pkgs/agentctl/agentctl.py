@@ -323,8 +323,6 @@ def render_agent_toml(args):
         top["packages"] = args.package
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
-    if getattr(args, "localpart", None):
-        toml_tables({"localpart": args.localpart}, "matrix", out)
     env = parse_kv(args.env, "--env")
     refuse_secrets(args.name, env)
     if env:
@@ -423,9 +421,7 @@ def cmd_add(state, args):
     path = os.path.join(reg, f"{name}.toml")
     if os.path.exists(path):
         die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
-    if args.localpart and not re.fullmatch(r"[a-z0-9._=/+-]+", args.localpart):
-        die(f"--localpart '{args.localpart}' is not a valid Matrix localpart (lowercase letters, digits, . _ = - / +)")
-    refuse_deactivated(state, name, args.localpart or name)
+    refuse_purged(state, name)
 
     secrets = prompt_secrets(state, parse_kv(args.secret, "--secret", prompt=True), args.no_prompt)
 
@@ -490,17 +486,11 @@ def matrix_record(state, name):
         return {}
 
 
-def refuse_deactivated(state, name, localpart):
-    """Synapse never reuses a deactivated id, so a purged agent's name needs a
-    new localpart. Catch it here instead of after a rebuild."""
+def refuse_purged(state, name):
+    """A purged name is retired for good; say so before anything is written."""
     rec = matrix_record(state, name)
-    uid = f"@{localpart}:{state['matrix']['serverName']}"
-    if rec.get("state") == "deactivated" and rec.get("user_id") == uid:
-        die(
-            f"{uid} was deactivated when '{name}' was removed with --purge, and Synapse never reuses such ids. "
-            f"Either pick another agent name, or keep '{name}' and give it a new Matrix id: "
-            f"agentctl add {name} --localpart {localpart}2 ..."
-        )
+    if rec.get("state") in ("purged", "deactivated"):
+        die(f"the name '{name}' was purged (agentctl rm --purge) and can never be used again; pick another name")
 
 
 def cmd_rm(state, args):
@@ -519,7 +509,11 @@ def cmd_rm(state, args):
     if a.get("source") != "toml":
         die(f"agent '{args.name}' is defined in Nix, not the registry; remove it from your configuration instead")
     if not args.yes:
-        what = "and PURGE its home, state and secrets" if args.purge else "(home and state are kept)"
+        what = (
+            "and PURGE it: delete home, state and secrets, and retire the name for good"
+            if args.purge
+            else "(home, state and Matrix account are kept; adding the same name later resumes it)"
+        )
         if not confirm(f"Remove agent '{args.name}' {what}?"):
             die("aborted", 2)
 
@@ -541,8 +535,8 @@ def cmd_rm(state, args):
         rebuild(state)
 
     if args.purge:
-        # The rebuild above locked the account; purge deactivates it for good.
-        purge_leftovers(state, args.name, deactivate=not args.no_rebuild)
+        # The rebuild above locked the account; purge retires the name.
+        purge_leftovers(state, args.name, retire=not args.no_rebuild)
     elif os.path.isdir(a.get("home") or ""):
         warn(
             f"{a['home']} was kept. Its files still belong to the freed UID, which a "
@@ -551,20 +545,18 @@ def cmd_rm(state, args):
     print(f"agent '{args.name}' removed")
 
 
-def purge_leftovers(state, name, deactivate=True):
+def purge_leftovers(state, name, retire=True):
     for p in (os.path.join(state["homeBase"], name), os.path.join(state["stateDir"], name)):
         if os.path.isdir(p):
             shutil.rmtree(p)
             print(f"purged {p}")
-    if deactivate:
-        r = run([state["matrix"]["ctl"], "deactivate", name], check=False, capture=True)
+    if retire:
+        r = run([state["matrix"]["ctl"], "purge", name], check=False, capture=True)
         out = (r.stdout + r.stderr).strip()
         if r.returncode != 0 and "no Matrix record" in out:
-            print(f"no Matrix account to deactivate for '{name}'")
+            print(f"no Matrix account to retire for '{name}'")
         elif out:
             print(out)
-        if r.returncode == 0:
-            print(f"note: a future agent called '{name}' needs a new Matrix id: agentctl add {name} --localpart {name}2 ...")
 
 
 def cmd_purge(state, args):
@@ -576,8 +568,8 @@ def cmd_purge(state, args):
     if os.path.exists(toml):
         die(f"{toml} still exists; remove it with `agentctl rm {args.name} --purge`")
     if args.name not in removed_agents(state):
-        print(f"nothing left on disk for '{args.name}'; deactivating its Matrix account if any")
-    elif not args.yes and not confirm(f"Delete home, state and secrets of removed agent '{args.name}' and deactivate its Matrix account for good?"):
+        print(f"nothing left on disk for '{args.name}'; retiring its Matrix name if it has one")
+    elif not args.yes and not confirm(f"Delete home, state and secrets of removed agent '{args.name}' and retire the name for good?"):
         die("aborted", 2)
     purge_leftovers(state, args.name)
     print(f"agent '{args.name}' purged")
@@ -633,7 +625,7 @@ def cmd_matrix(state, args):
     sub = args.sub or "status"
     if sub != "check":
         need_root()
-    if sub in ("status", "check", "introduce", "rotate-token", "deactivate"):
+    if sub in ("status", "check", "introduce", "rotate-token"):
         ctl = m["ctl"]
         extra = [args.name] if getattr(args, "name", None) else []
         os.execvp(ctl, [ctl, sub, *extra])
@@ -711,7 +703,6 @@ def build_parser():
     s.add_argument("name")
     s.add_argument("--model", help="Hermes model id, e.g. anthropic/claude-sonnet-5.5")
     s.add_argument("--description", help="free text shown in `agentctl list` and in the introduction")
-    s.add_argument("--localpart", metavar="LOCALPART", help="Matrix id to use instead of the agent name (@LOCALPART:server); needed when the name's id was deactivated by an earlier rm --purge")
     s.add_argument("--memory-max", metavar="SIZE", help="systemd MemoryMax, e.g. 4G")
     s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%")
     s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")
@@ -725,12 +716,12 @@ def build_parser():
 
     s = sub.add_parser("rm", help="remove an agent and rebuild; its Matrix account is locked")
     s.add_argument("name")
-    s.add_argument("--purge", action="store_true", help="also delete home, state and secrets, and deactivate the Matrix account for good")
+    s.add_argument("--purge", action="store_true", help="also delete home, state and secrets, and retire the name for good (it can never be used again)")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
     s.add_argument("--no-rebuild", action="store_true", help="remove the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_rm)
 
-    s = sub.add_parser("purge", help="delete what `rm` left behind for an agent that no longer exists, and deactivate its Matrix account")
+    s = sub.add_parser("purge", help="for an agent removed without --purge: delete what was left behind and retire the name for good")
     s.add_argument("name")
     s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
     s.set_defaults(func=cmd_purge)
@@ -762,8 +753,6 @@ def build_parser():
     x = ms.add_parser("introduce", help="(re)send the agent's introduction DM to the operator")
     x.add_argument("name")
     x = ms.add_parser("rotate-token", help="log the agent out everywhere and issue it a new token")
-    x.add_argument("name")
-    x = ms.add_parser("deactivate", help="permanently deactivate the account of an agent that was removed")
     x.add_argument("name")
     ms.add_parser("start", help="start Synapse, the reconciler and every enabled agent")
     ms.add_parser("stop", help="stop Synapse; the reconciler and every agent stop with it")

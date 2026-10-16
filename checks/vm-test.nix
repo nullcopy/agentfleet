@@ -110,7 +110,7 @@ pkgs.testers.runNixOSTest {
     assert tok == machine.succeed("awk -F'\\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
     machine.succeed("agentctl matrix rotate-token sleeper")
     machine.fail(f"curl -sf -H 'Authorization: Bearer {tok}' http://127.0.0.1:8008/_matrix/client/v3/account/whoami")
-    machine.fail("agentctl matrix deactivate sleeper")  # still declared
+    machine.fail("agentctl purge sleeper --yes")  # still declared
 
     # agentctl add / rm against a git-tracked registry (rebuild is a no-op here)
     machine.succeed("mkdir -p /root/flake/agents && git -C /root/flake init -q")
