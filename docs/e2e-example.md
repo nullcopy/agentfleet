@@ -114,5 +114,7 @@ agent 'scout' removed
 Without `--purge` the home, state and Matrix account are kept and the account
 merely locked; a later `agentctl add scout` unlocks it and the old DM room is
 still there. With `--purge` the account is deactivated, which Synapse makes
-permanent; a future `scout` needs `[matrix] localpart = "scout2"` in its
-registry file.
+permanent; a future `scout` needs a new Matrix id, which is what
+`agentctl add scout --localpart scout2 ...` does (it writes
+`[matrix] localpart = "scout2"` to the registry file). `agentctl add scout`
+without it refuses and tells you so.

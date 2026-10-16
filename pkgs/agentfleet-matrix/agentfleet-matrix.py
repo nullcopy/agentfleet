@@ -40,6 +40,10 @@ def die(msg, code=1):
 # ----------------------------------------------------------------------------
 # HTTP
 # ----------------------------------------------------------------------------
+class ProvisionError(Exception):
+    """A problem with one agent's account; logged, never fatal for the run."""
+
+
 class ApiError(Exception):
     def __init__(self, status, body):
         super().__init__(f"HTTP {status}: {body}")
@@ -210,7 +214,11 @@ class Synapse:
         fresh access token bound to a stable device id."""
         info = self.get_user(uid)
         if info and info.get("deactivated"):
-            die(f"{uid} is deactivated; Synapse never reuses such ids. Set matrix.localpart to a new name for this agent")
+            raise ProvisionError(
+                f"{uid} was deactivated by an earlier `agentctl rm --purge`; Synapse never reuses such ids. "
+                f"Give this agent another Matrix id: `[matrix] localpart = \"<name>2\"` in its registry file "
+                f"(agentctl add --localpart), then rebuild"
+            )
         password = secrets.token_urlsafe(32)
         body = {"password": password, "logout_devices": False}
         if info is None:
@@ -379,7 +387,7 @@ def read_token(env_file):
             if line.startswith("MATRIX_ACCESS_TOKEN="):
                 v = line.split("=", 1)[1].strip()
                 return v[1:-1].replace('\\"', '"').replace("\\\\", "\\") if v.startswith('"') else v
-    die(f"no MATRIX_ACCESS_TOKEN in {env_file}")
+    raise ProvisionError(f"no MATRIX_ACCESS_TOKEN in {env_file}")
 
 
 def cmd_reconcile(spec, args):
@@ -394,6 +402,9 @@ def cmd_reconcile(spec, args):
     for name, a in sorted(spec["agents"].items()):
         try:
             provision(syn, spec, name, a, records.get(name, {}))
+        except ProvisionError as e:
+            failed.append(name)
+            log(f"{name}: NOT provisioned: {e}")
         except Exception as e:
             failed.append(name)
             log(f"{name}: provisioning failed ({type(e).__name__}: {e}); will retry on the next run")

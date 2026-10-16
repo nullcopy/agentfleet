@@ -323,6 +323,8 @@ def render_agent_toml(args):
         top["packages"] = args.package
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
+    if getattr(args, "localpart", None):
+        toml_tables({"localpart": args.localpart}, "matrix", out)
     env = parse_kv(args.env, "--env")
     refuse_secrets(args.name, env)
     if env:
@@ -421,6 +423,9 @@ def cmd_add(state, args):
     path = os.path.join(reg, f"{name}.toml")
     if os.path.exists(path):
         die(f"{path} already exists (rebuild the host to deploy it: {rebuild_cmd(state)})")
+    if args.localpart and not re.fullmatch(r"[a-z0-9._=/+-]+", args.localpart):
+        die(f"--localpart '{args.localpart}' is not a valid Matrix localpart (lowercase letters, digits, . _ = - / +)")
+    refuse_deactivated(state, name, args.localpart or name)
 
     secrets = prompt_secrets(state, parse_kv(args.secret, "--secret", prompt=True), args.no_prompt)
 
@@ -475,6 +480,27 @@ def report_after_rebuild(state, name):
     else:
         warn(f"agent '{name}' is NOT running ({unit_state(unit) if unit else 'no unit'}); see `agentctl logs {name}`.")
     sys.exit(1)
+
+
+def matrix_record(state, name):
+    try:
+        with open(os.path.join(state["matrix"]["stateDir"], "agents", f"{name}.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def refuse_deactivated(state, name, localpart):
+    """Synapse never reuses a deactivated id, so a purged agent's name needs a
+    new localpart. Catch it here instead of after a rebuild."""
+    rec = matrix_record(state, name)
+    uid = f"@{localpart}:{state['matrix']['serverName']}"
+    if rec.get("state") == "deactivated" and rec.get("user_id") == uid:
+        die(
+            f"{uid} was deactivated when '{name}' was removed with --purge, and Synapse never reuses such ids. "
+            f"Either pick another agent name, or keep '{name}' and give it a new Matrix id: "
+            f"agentctl add {name} --localpart {localpart}2 ..."
+        )
 
 
 def cmd_rm(state, args):
@@ -537,6 +563,8 @@ def purge_leftovers(state, name, deactivate=True):
             print(f"no Matrix account to deactivate for '{name}'")
         elif out:
             print(out)
+        if r.returncode == 0:
+            print(f"note: a future agent called '{name}' needs a new Matrix id: agentctl add {name} --localpart {name}2 ...")
 
 
 def cmd_purge(state, args):
@@ -683,6 +711,7 @@ def build_parser():
     s.add_argument("name")
     s.add_argument("--model", help="Hermes model id, e.g. anthropic/claude-sonnet-5.5")
     s.add_argument("--description", help="free text shown in `agentctl list` and in the introduction")
+    s.add_argument("--localpart", metavar="LOCALPART", help="Matrix id to use instead of the agent name (@LOCALPART:server); needed when the name's id was deactivated by an earlier rm --purge")
     s.add_argument("--memory-max", metavar="SIZE", help="systemd MemoryMax, e.g. 4G")
     s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%")
     s.add_argument("--package", action="append", metavar="PKG", help="extra nixpkgs package on PATH (repeatable)")

@@ -47,6 +47,7 @@ _agentctl() {
                         '1:name:' \
                         '--model[Hermes model id]:model:' \
                         '--description[free text]:description:' \
+                        '--localpart[Matrix id instead of the name]:localpart:' \
                         '--memory-max[systemd MemoryMax]:size:' \
                         '--cpu-quota[systemd CPUQuota]:percent:' \
                         '*--package[extra nixpkgs package]:package:' \

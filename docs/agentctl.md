@@ -34,6 +34,7 @@ it points you at `matrix check`.
 | --- | --- |
 | `--model M` | Hermes model id, e.g. `anthropic/claude-sonnet-5.5` |
 | `--description TEXT` | shown by `list` and in the introduction DM |
+| `--localpart L` | Matrix id `@L:<server>` instead of `@<name>:<server>`. Required to reuse the name of an agent that was removed with `--purge`, because Synapse never reuses a deactivated id; `add` refuses such a name up front and suggests this |
 | `--memory-max SIZE`, `--cpu-quota PCT` | systemd `MemoryMax` / `CPUQuota` |
 | `--package PKG` | extra nixpkgs package on the agent's PATH, repeatable |
 | `--env K=V` | non-secret environment variable, repeatable |

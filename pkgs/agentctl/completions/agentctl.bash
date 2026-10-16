@@ -15,9 +15,9 @@ _agentctl() {
     local names="" opts=""
     case $cmd in
         add)
-            opts="--model --description --memory-max --cpu-quota --package --env --set --set-str --secret --no-prompt --no-rebuild"
+            opts="--model --description --localpart --memory-max --cpu-quota --package --env --set --set-str --secret --no-prompt --no-rebuild"
             case $prev in
-                --model|--description|--memory-max|--cpu-quota|--package|--env|--set|--set-str|--secret) return ;;
+                --model|--description|--localpart|--memory-max|--cpu-quota|--package|--env|--set|--set-str|--secret) return ;;
             esac
             ;;
         rm)
