@@ -317,7 +317,7 @@ sudo agentctl purge <name> --yes                    # for each existing agent
 sudo systemctl stop agentfleet-matrix matrix-synapse
 sudo -u postgres dropdb matrix-synapse
 sudo rm -rf /var/lib/matrix-synapse /var/lib/agentfleet/matrix
-sudo systemctl restart agentfleet-matrix-secret agentfleet-matrix-db
+sudo systemctl restart agentfleet-matrix-secret agentfleet-matrix-db   # recreate the secret and the database
 # now change serverName / publicBaseUrl in configuration.nix, then:
 sudo nixos-rebuild switch --flake /etc/nixos
 sudo systemctl start matrix-synapse agentfleet-matrix

@@ -229,6 +229,10 @@ in
       script = ''
         set -eu
         umask 077
+        # tmpfiles creates the directory at boot; recreate it here too so that
+        # wiping the state directory (docs/install.md, "Starting the server
+        # over") does not need a reboot.
+        install -d -m 0750 -o root -g matrix-synapse ${stateDir}
         if [ ! -s ${synapseSecrets} ]; then
           secret=$(head -c 48 /dev/urandom | base64 -w0 | tr -d '/+=')
           printf 'registration_shared_secret: "%s"\n' "$secret" > ${synapseSecrets}.tmp
