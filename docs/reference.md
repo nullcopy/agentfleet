@@ -30,8 +30,12 @@ localpart = "scout2"                   # only if @scout was deactivated earlier
 for the full option list.
 
 Everything in the registry, including `[settings]` and `[environment]`, is
-copied into the world-readable Nix store. Keys and tokens go in the secrets
-file, never there.
+copied into the world-readable Nix store and, being part of your flake,
+committed to git. Keys and tokens go in the secrets file, never there. As a
+guard, a variable or settings key whose name contains `KEY`, `TOKEN`,
+`SECRET`, `PASSWORD` or `CREDENTIAL` fails evaluation (names ending in `_ENV`,
+such as `key_env`, are allowed because they only point at a variable), and
+`agentctl add` refuses the same names in `--env` and `--set`.
 
 ## What an agent gets
 

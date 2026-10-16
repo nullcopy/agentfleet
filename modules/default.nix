@@ -226,6 +226,30 @@ let
       // a.environment;
     };
 
+  # The registry ends up in the world-readable Nix store and in git, so a
+  # key that looks like a credential is refused; `key_env`-style names, which
+  # only point at a variable, are fine.
+  secretLike =
+    k:
+    let
+      u = lib.toUpper k;
+    in
+    builtins.match ".*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL).*" u != null
+    && builtins.match ".*_ENV" u == null;
+  settingsLeaves =
+    prefix: s:
+    lib.concatLists (
+      mapAttrsToList (
+        k: v: if lib.isAttrs v then settingsLeaves "${prefix}${k}." v else [ "${prefix}${k}" ]
+      ) s
+    );
+  leakyKeys =
+    a:
+    (lib.filter secretLike (attrNames a.environment))
+    ++ (lib.filter (path: secretLike (lib.last (lib.splitString "." path))) (
+      settingsLeaves "" a.settings
+    ));
+
   enabledAgents = filterAttrs (_: a: a.enable) allAgents;
   agents = mapAttrs resolve enabledAgents;
 
@@ -512,6 +536,10 @@ in
         ++ (mapAttrsToList (name: a: {
           assertion = builtins.match "[a-z0-9._=/+-]+" a.matrix.localpart != null;
           message = "agentfleet: agent '${name}': matrix.localpart '${a.matrix.localpart}' is not a valid Matrix localpart";
+        }) allAgents)
+        ++ (mapAttrsToList (name: a: {
+          assertion = leakyKeys a == [ ];
+          message = "agentfleet: agent '${name}': ${concatStringsSep ", " (leakyKeys a)} look(s) like a secret. The registry is copied into the world-readable Nix store and committed to git; use `agentctl secrets set ${name} <NAME>` instead";
         }) allAgents)
         ++ [
           {

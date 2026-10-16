@@ -282,6 +282,30 @@ def set_nested(d, dotted, value):
     d[parts[-1]] = value
 
 
+_SECRET_LIKE = re.compile(r".*(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL).*")
+
+
+def secret_like(key):
+    """Mirrors the module's check: the registry is world-readable (Nix store)
+    and committed, so credential-looking names are refused there."""
+    u = key.upper()
+    return bool(_SECRET_LIKE.match(u)) and not u.endswith("_ENV")
+
+
+def refuse_secrets(name, keys):
+    bad = [k for k in keys if secret_like(k.rsplit(".", 1)[-1])]
+    if bad:
+        hint = (
+            f"use --secret {bad[0]} (or `agentctl secrets set {name} {bad[0]}`)"
+            if "." not in bad[0]
+            else f"store the value with --secret <NAME> and point Hermes at it with --set {bad[0]}_env=<NAME>"
+        )
+        die(
+            f"{', '.join(bad)} look(s) like a secret and would land in the registry, which is copied "
+            f"into the world-readable Nix store and committed to git; {hint} instead"
+        )
+
+
 def render_agent_toml(args):
     top = {}
     if args.description:
@@ -297,6 +321,7 @@ def render_agent_toml(args):
     out = [f"# agent '{args.name}' - created by agentctl; edit freely, then rebuild the host."]
     toml_tables(top, "", out)
     env = parse_kv(args.env, "--env")
+    refuse_secrets(args.name, env)
     if env:
         toml_tables(env, "environment", out)
     settings = {}
@@ -304,6 +329,7 @@ def render_agent_toml(args):
         if "=" not in item:
             die(f"--set expects key=value, got '{item}'")
         k, v = item.split("=", 1)
+        refuse_secrets(args.name, [k])
         set_nested(settings, k, coerce(v) if literal else v)
     if settings:
         toml_tables(settings, "settings", out)
