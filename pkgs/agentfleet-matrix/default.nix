@@ -4,6 +4,7 @@
   stdenvNoCC,
   makeWrapper,
   systemd,
+  cacert,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -16,6 +17,7 @@ stdenvNoCC.mkDerivation {
     install -D -m 0755 agentfleet-matrix.py $out/bin/agentfleet-matrix
     patchShebangs $out/bin/agentfleet-matrix
     wrapProgram $out/bin/agentfleet-matrix \
+      --set-default SSL_CERT_FILE ${cacert}/etc/ssl/certs/ca-bundle.crt \
       --prefix PATH : ${
         lib.makeBinPath [
           python3

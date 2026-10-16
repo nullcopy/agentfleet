@@ -79,6 +79,7 @@ _agentctl() {
                     local -a subs
                     subs=(
                         'status:homeserver, admin account, every agent account'
+                        'check:can the internet reach this server (DNS, TLS, proxy, federation)'
                         'introduce:(re)send the introduction DM'
                         'rotate-token:log the agent out everywhere, new token'
                         'deactivate:permanently deactivate a removed agent'\''s account'

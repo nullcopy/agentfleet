@@ -454,7 +454,18 @@ def report_after_rebuild(state, name):
     a = new["agents"].get(name)
     unit = (a or {}).get("service")
     if unit and is_active(unit):
-        print(f"agent '{name}' is up and will introduce itself to {new['matrix']['operator']} on Matrix.")
+        operator = new["matrix"]["operator"]
+        rec = {}
+        try:
+            with open(os.path.join(new["matrix"]["stateDir"], "agents", f"{name}.json")) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if rec.get("introduced_room"):
+            print(f"agent '{name}' is up and has invited {operator} to {rec['introduced_room']}. Accept the invite in your Matrix client.")
+        else:
+            warn(f"agent '{name}' is up, but its invitation to {operator} could not be delivered.")
+            warn("Run `agentctl matrix check` to see what is wrong with DNS, proxy or federation; the invite is retried on every rebuild and by `agentctl matrix introduce " + name + "`.")
         print(f"Next: agentctl logs {name} -f")
         return
     synapse = new["matrix"]["synapseService"]
@@ -589,11 +600,12 @@ def cmd_logs(state, args):
 
 
 def cmd_matrix(state, args):
-    need_root()
     m = state["matrix"]
     synapse, reconcile = m["synapseService"], m["reconcileService"]
     sub = args.sub or "status"
-    if sub in ("status", "introduce", "rotate-token", "deactivate"):
+    if sub != "check":
+        need_root()
+    if sub in ("status", "check", "introduce", "rotate-token", "deactivate"):
         ctl = m["ctl"]
         extra = [args.name] if getattr(args, "name", None) else []
         os.execvp(ctl, [ctl, sub, *extra])
@@ -717,6 +729,7 @@ def build_parser():
     )
     ms = s.add_subparsers(dest="sub", metavar="<subcommand>")
     ms.add_parser("status", help="homeserver, admin account, and every agent's account state")
+    ms.add_parser("check", help="can the internet reach this server: DNS, TLS, proxy routes, .well-known, federation (no root needed)")
     x = ms.add_parser("introduce", help="(re)send the agent's introduction DM to the operator")
     x.add_argument("name")
     x = ms.add_parser("rotate-token", help="log the agent out everywhere and issue it a new token")

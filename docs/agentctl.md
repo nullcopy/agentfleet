@@ -15,7 +15,7 @@ agentctl start|stop|restart <name> | --all
 agentctl status [<name>]
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name> ...
-agentctl matrix [status|introduce <name>|rotate-token <name>|deactivate <name>|start|stop|restart|logs]
+agentctl matrix [status|check|introduce <name>|rotate-token <name>|deactivate <name>|start|stop|restart|logs]
 ```
 
 ## Agents
@@ -26,9 +26,9 @@ on disk show up as `removed`.
 
 **`add <name>`** writes `<registry>/<name>.toml`, stages it in git, stores
 the provider key, runs `nixos-rebuild switch`, and the new agent introduces
-itself to you on Matrix. After the rebuild it checks that the agent's service
-is running and exits non-zero with a hint if it is not, most often because
-the Matrix server is down.
+itself to you on Matrix. After the rebuild it reports whether the agent runs
+and whether the invitation reached you; if the invite could not be delivered
+it points you at `matrix check`.
 
 | option | effect |
 | --- | --- |
@@ -84,6 +84,7 @@ service requires both, so stopping the server stops the agents.
 
 | subcommand | what it does |
 | --- | --- |
+| `matrix check` | no root needed. Verifies from the host that the internet can reach the server: Synapse locally, DNS, HTTPS and the proxy routes, that the proxy forwards to this Synapse, both `.well-known` documents, outbound federation to the operator's homeserver, and the Matrix Federation Tester's view from outside. Prints `OK`/`FAIL` per item with a hint and exits non-zero on any failure. Run it before creating the first agent and whenever an introduction does not arrive |
 | `matrix` or `matrix status` | is the homeserver up, which admin account bootstrapped it, who the operator is, and one row per agent account: `pending` (not yet provisioned), `active`, `locked` (removed with `rm`), `deactivated` (purged), plus the id of the introduction room |
 | `matrix introduce <name>` | send the introduction DM again, for example after federation started working |
 | `matrix rotate-token <name>` | log the agent out of every session and issue a fresh token; the agent restarts with it. Use when a token may have leaked |

@@ -406,7 +406,7 @@ let
     };
     secrets = providerSecrets;
     matrix = {
-      inherit (cfg.matrix) serverName operator;
+      inherit (cfg.matrix) serverName operator stateDir;
       ctl = "${cfg.matrix.package}/bin/agentfleet-matrix";
       synapseService = "matrix-synapse.service";
       reconcileService = "agentfleet-matrix.service";

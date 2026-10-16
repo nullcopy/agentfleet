@@ -112,7 +112,8 @@ step with it:
    operator, which makes Synapse contact the operator's homeserver and only
    works once federation works in both directions. Until then the invite is
    retried on every run and by `agentctl matrix introduce <name>`, always in
-   the same room, so you never receive more than one invite per agent.
+   the same room, so you never receive more than one invite per agent;
+   `agentctl matrix check` finds out why it fails.
    A failure here, or anything else that goes wrong for one agent, is logged
    and does not fail the unit or affect other agents.
 4. Locks the account and logs out every device of any agent it provisioned
@@ -122,6 +123,7 @@ Commands:
 
 ```
 agentctl matrix status                 homeserver, admin, per-agent account state
+agentctl matrix check                  DNS, TLS, proxy routes, .well-known, federation, from the host (no root)
 agentctl matrix introduce <name>       resend the introduction DM
 agentctl matrix rotate-token <name>    log out every session, issue a new token, restart the agent
 agentctl matrix deactivate <name>      after `agentctl rm`: deactivate the account for good

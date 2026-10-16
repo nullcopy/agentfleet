@@ -362,13 +362,11 @@ def introduce(syn, spec, name, a, rec, resend=False):
     except ApiError as e:
         if not (e.status == 403 and "already in the room" in e.body):
             log(f"{name}: could not invite {operator} to {room} yet ({e.errcode or e.status}); will retry on the next run or "
-                f"`agentctl matrix introduce {name}`. Federation with {operator.split(':', 1)[1]} must work in both "
-                f"directions: check https://federationtester.matrix.org/ for {spec['serverName']}.")
+                f"`agentctl matrix introduce {name}`. Run `agentctl matrix check`.")
             return
     except Exception as e:  # timeouts, connection errors: all retryable
         log(f"{name}: could not invite {operator} to {room} yet ({type(e).__name__}); will retry on the next run or "
-            f"`agentctl matrix introduce {name}`. Federation with {operator.split(':', 1)[1]} must work in both "
-            f"directions: check https://federationtester.matrix.org/ for {spec['serverName']}.")
+            f"`agentctl matrix introduce {name}`. Run `agentctl matrix check`.")
         return
     rec.update({"introduced_room": room, "introduced_at": int(time.time())})
     write_json(record_path(spec, name), rec)
@@ -412,6 +410,159 @@ def cmd_reconcile(spec, args):
         log(f"{name}: agent gone, locked {rec['user_id']} and logged out its devices")
     if failed:
         log(f"{len(failed)} agent(s) not fully provisioned: {', '.join(failed)}")
+
+
+# ----------------------------------------------------------------------------
+# check: can the world reach this server?  (no root needed)
+# ----------------------------------------------------------------------------
+def fetch(url, timeout=15):
+    """GET url; return (status, body_text). TLS is verified."""
+    req = urllib.request.Request(url, headers={"User-Agent": "agentfleet-matrix/check"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+
+
+def delegated_target(server_name):
+    """Where federation for server_name goes, per .well-known; falls back to
+    server_name:8448 like other homeservers do."""
+    try:
+        st, body = fetch(f"https://{server_name}/.well-known/matrix/server")
+        if st == 200:
+            target = json.loads(body).get("m.server", "")
+            if target:
+                return target if ":" in target else f"{target}:8448", True
+    except Exception:
+        pass
+    return f"{server_name}:8448", False
+
+
+def cmd_check(spec, args):
+    import socket
+    import ssl
+
+    name, public = spec["serverName"], spec["publicBaseUrl"].rstrip("/")
+    operator_server = spec["operator"].split(":", 1)[1]
+    results = []
+
+    def ok(what, detail=""):
+        results.append(True)
+        print(f"  OK    {what}" + (f": {detail}" if detail else ""))
+
+    def fail(what, detail, hint):
+        results.append(False)
+        print(f"  FAIL  {what}: {detail}")
+        print(f"        -> {hint}")
+
+    print(f"Checking {name} (public URL {public}) from this host\n")
+
+    # 1. local
+    try:
+        api(spec["clientUrl"], "GET", "/_matrix/client/versions")
+        ok("Synapse answers on the host", spec["clientUrl"])
+    except Exception as e:
+        fail("Synapse answers on the host", f"{spec['clientUrl']}: {e}", "see `agentctl matrix logs -n 50`")
+
+    # 2. DNS
+    host = urllib.parse.urlparse(public).hostname or name
+    try:
+        addrs = sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)})
+        ok(f"DNS for {host}", ", ".join(addrs))
+    except socket.gaierror as e:
+        fail(f"DNS for {host}", str(e), f"create an A (and/or AAAA) record for {host} pointing at the proxy host")
+        addrs = []
+
+    # 3. TLS + proxy routes
+    try:
+        st, body = fetch(f"{public}/_matrix/client/versions")
+        if st == 200 and "versions" in json.loads(body):
+            ok("HTTPS and the /_matrix route through the proxy", f"{public}/_matrix/client/versions")
+        else:
+            fail("the /_matrix route through the proxy", f"HTTP {st}", "the proxy must forward /_matrix/* to this host's Synapse")
+    except ssl.SSLCertVerificationError as e:
+        fail("TLS certificate", e.reason or str(e), "the proxy needs a valid certificate for the public name; with Caddy, check its log for the ACME failure")
+    except Exception as e:
+        fail("reaching the proxy over HTTPS", f"{type(e).__name__}: {e}", "is port 443 open on the proxy host and is it forwarding to this host's port 8008?")
+
+    # 4. Is it OUR Synapse behind the proxy?
+    try:
+        st, body = fetch(f"{public}/_matrix/key/v2/server")
+        served = json.loads(body).get("server_name") if st == 200 else None
+        if served == name:
+            ok("the proxy reaches this Synapse", f"server_name {served}")
+        else:
+            fail("the proxy reaches this Synapse", f"HTTP {st}, server_name {served!r}",
+                 "the proxy is forwarding to something else, or serverName here differs from what it was set up with")
+    except Exception as e:
+        fail("the proxy reaches this Synapse", f"{type(e).__name__}: {e}", "see the previous item")
+
+    # 5. .well-known
+    try:
+        st, body = fetch(f"https://{name}/.well-known/matrix/server")
+        target = json.loads(body).get("m.server") if st == 200 else None
+        if target:
+            ok(".well-known/matrix/server", f"m.server {target}")
+            try:
+                st2, body2 = fetch(f"https://{target if ':' in target else target + ':8448'}/_matrix/key/v2/server")
+                if st2 == 200 and json.loads(body2).get("server_name") == name:
+                    ok("federation endpoint behind m.server", f"https://{target}/_matrix/key/v2/server")
+                else:
+                    fail("federation endpoint behind m.server", f"HTTP {st2}", f"https://{target} must forward /_matrix/* to this Synapse")
+            except Exception as e:
+                fail("federation endpoint behind m.server", f"{type(e).__name__}: {e}", f"{target} is what other homeservers will contact; it must serve HTTPS and route /_matrix")
+        else:
+            fail(".well-known/matrix/server", f"HTTP {st}",
+                 f"serve https://{name}/.well-known/matrix/server with {{\"m.server\": \"{host}:443\"}} (otherwise other servers try port 8448)")
+    except Exception as e:
+        fail(".well-known/matrix/server", f"{type(e).__name__}: {e}", f"https://{name} must be reachable and serve the .well-known document")
+    try:
+        st, body = fetch(f"https://{name}/.well-known/matrix/client")
+        base = json.loads(body).get("m.homeserver", {}).get("base_url") if st == 200 else None
+        if base:
+            ok(".well-known/matrix/client", f"base_url {base}")
+        else:
+            fail(".well-known/matrix/client", f"HTTP {st}", f"serve {{\"m.homeserver\": {{\"base_url\": \"{public}\"}}}}; clients use it to find the server")
+    except Exception as e:
+        fail(".well-known/matrix/client", f"{type(e).__name__}: {e}", "see the previous item")
+
+    # 6. outbound: the operator's homeserver
+    try:
+        target, _ = delegated_target(operator_server)
+        st, body = fetch(f"https://{target}/_matrix/key/v2/server")
+        if st == 200:
+            ok(f"outbound federation to {operator_server}", f"https://{target}")
+        else:
+            fail(f"outbound federation to {operator_server}", f"HTTP {st}", "this host must be able to reach the operator's homeserver over HTTPS")
+    except Exception as e:
+        fail(f"outbound federation to {operator_server}", f"{type(e).__name__}: {e}", "this host needs outbound HTTPS; check the firewall and DNS")
+
+    # 7. the view from outside
+    try:
+        st, body = fetch(f"https://federationtester.matrix.org/api/report?server_name={urllib.parse.quote(name)}", timeout=40)
+        rep = json.loads(body) if st == 200 else {}
+        if rep.get("FederationOK"):
+            ok("Matrix Federation Tester (from the internet)", "FederationOK")
+        else:
+            errs = []
+            for k, v in (rep.get("ConnectionReports") or {}).items():
+                errs += [f"{k}: {e}" for e in (v.get("Errors") or [])]
+            for k, v in (rep.get("ConnectionErrors") or {}).items():
+                errs.append(f"{k}: {v.get('Message') or v}")
+            if rep.get("DNSResult", {}).get("SRVError"):
+                pass  # no SRV record is fine
+            fail("Matrix Federation Tester (from the internet)", "; ".join(errs[:3]) or f"HTTP {st}",
+                 f"https://federationtester.matrix.org/#{name} shows the full report")
+    except Exception as e:
+        print(f"  SKIP  Matrix Federation Tester: {type(e).__name__}: {e}")
+
+    print()
+    if all(results):
+        print("All good: other homeservers can reach this one. Agents will be able to reach the operator.")
+        return
+    print(f"{results.count(False)} problem(s). Fix them, then run this again; agents keep retrying their introduction meanwhile.")
+    sys.exit(1)
 
 
 def cmd_status(spec, args):
@@ -486,6 +637,7 @@ def main():
     sub.required = True
     sub.add_parser("reconcile", help="provision declared agents, lock vanished ones (run by the unit)").set_defaults(func=cmd_reconcile)
     sub.add_parser("status", help="homeserver, admin and per-agent account state").set_defaults(func=cmd_status)
+    sub.add_parser("check", help="is the server reachable from the internet: DNS, TLS, proxy routes, .well-known, federation").set_defaults(func=cmd_check)
     s = sub.add_parser("introduce", help="(re)send the agent's introduction DM to the operator")
     s.add_argument("name")
     s.set_defaults(func=cmd_introduce)
@@ -496,7 +648,7 @@ def main():
     s.add_argument("name")
     s.set_defaults(func=cmd_deactivate)
     args = p.parse_args()
-    if os.geteuid() != 0:
+    if os.geteuid() != 0 and args.func is not cmd_check:
         die("must run as root")
     args.func(load_spec(), args)
 

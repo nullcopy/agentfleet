@@ -9,6 +9,11 @@ the fleet: each agent is a small TOML file inside it, `agentctl` edits those
 files and runs `nixos-rebuild` for you, and the NixOS module turns them into
 users, services and Matrix accounts.
 
+Installation has two phases. First you stand up the Matrix server and prove
+that the internet can reach it (steps 1 to 6). Only then do you create agents
+(the [end-to-end example](e2e-example.md)). An agent created before the
+server is reachable comes up fine but cannot deliver its introduction to you.
+
 ## What you need
 
 Two machines, or one machine playing both roles:
@@ -196,7 +201,7 @@ outer braces removed, plus `networking.firewall.allowedTCPPorts = [ 80 443 ];`.
 If the proxy runs on the fleet host, leave `listenAddresses` and the firewall
 line out of step 3 and use `127.0.0.1:8008` here.
 
-## 5. Create the registry directory and rebuild
+## 5. Stand up the server: create the registry directory and rebuild
 
 On the fleet host:
 
@@ -207,36 +212,60 @@ git add agents flake.nix configuration.nix   # flakes ignore untracked files
 sudo nixos-rebuild switch --flake .
 ```
 
-The first rebuild builds Hermes and Synapse, which takes a while.
+The first rebuild builds Hermes and Synapse, which takes a while. When it is
+done, Synapse runs on the host and the reconciler has created the admin
+account; no agents exist yet.
 
-## 6. Check it works
+## 6. Verify that the world can reach the server
 
 On the fleet host:
 
 ```sh
-agentctl list                   # "no agents defined"
-sudo agentctl matrix status     # first line must say "up"
+agentctl matrix check
 ```
 
-If `matrix status` says `DOWN`, nothing else will work: every agent requires
-the server. `sudo agentctl matrix logs -n 50` shows why. The usual causes are
-an address in `listenAddresses` that this host does not have (check with
-`ip addr`), or another program already on port 8008.
+It checks, in order: Synapse answers locally, DNS for the public name, HTTPS
+and the `/_matrix` route through the proxy, that the proxy really forwards
+to *this* Synapse, both `.well-known` documents, outbound federation to your
+own homeserver, and finally asks the
+[Matrix Federation Tester](https://federationtester.matrix.org/) for the view
+from the internet. Each line is `OK` or `FAIL` with a hint:
 
-From the proxy host, confirm it can reach Synapse over the private network:
+```
+Checking matrix.example.org (public URL https://matrix.example.org) from this host
 
-```sh
-curl http://10.0.0.2:8008/_matrix/client/versions   # a JSON list of versions
+  OK    Synapse answers on the host: http://127.0.0.1:8008
+  OK    DNS for matrix.example.org: 203.0.113.5
+  OK    HTTPS and the /_matrix route through the proxy: https://matrix.example.org/_matrix/client/versions
+  OK    the proxy reaches this Synapse: server_name matrix.example.org
+  OK    .well-known/matrix/server: m.server matrix.example.org:443
+  OK    federation endpoint behind m.server: https://matrix.example.org:443/_matrix/key/v2/server
+  OK    .well-known/matrix/client: base_url https://matrix.example.org
+  OK    outbound federation to example.com: https://matrix.example.com:443
+  OK    Matrix Federation Tester (from the internet): FederationOK
+
+All good: other homeservers can reach this one. Agents will be able to reach the operator.
 ```
 
-Then confirm the public side with the
-[Matrix Federation Tester](https://federationtester.matrix.org/) by entering
-`matrix.example.org`. It checks DNS, the certificate, the `.well-known`
-document and the federation API in one go and says which one is wrong. Until
-it passes, agents come up fine but their introduction DMs cannot reach you;
-they are retried on every rebuild and by `agentctl matrix introduce <name>`.
+Do not continue until every line is `OK`. Typical failures and what they
+mean:
 
-Continue with the [end-to-end example](e2e-example.md).
+| failing line | usual cause |
+| --- | --- |
+| Synapse answers on the host | the server is down; `sudo agentctl matrix logs -n 50` |
+| DNS | the record is missing or still propagating, or points at the wrong address |
+| HTTPS / `/_matrix` route | port 443 closed on the proxy host, Caddy not running, or the proxy host cannot reach the fleet host on 8008 (firewall, wrong `listenAddresses`) |
+| the proxy reaches this Synapse | the proxy forwards somewhere else, or `serverName` was changed after the first start |
+| .well-known | the two `handle` blocks are missing from the Caddyfile |
+| outbound federation | the fleet host has no outbound HTTPS, or your homeserver is down |
+| Federation Tester | anything above, as seen from outside; its web page has the full report |
+
+For reference, `sudo agentctl matrix status` shows the server, the admin
+account and the agents' accounts; with no agents yet it ends with
+`no matrix agents`.
+
+Now continue with the [end-to-end example](e2e-example.md) to create your
+first agent.
 
 ## Variations
 

@@ -1,11 +1,16 @@
 # End-to-end example
 
 Continues from [install](install.md): `myhost` runs agentfleet with the Matrix
-server `matrix.example.org`, the federation tester passes, and you are
-`@alice:example.com`. We create an agent called `scout`, receive its
+server `matrix.example.org`, `agentctl matrix check` reports all `OK`, and
+you are `@alice:example.com`. We create an agent called `scout`, receive its
 introduction, chat with it, and remove it again. Nothing here requires
 touching the agent on the command line; `agentctl` runs on the host, the
 conversation happens in your Matrix client.
+
+If you skipped the check, run it now. An agent whose invitation cannot be
+delivered shows up as `up, but its invitation ... could not be delivered`
+at the end of `agentctl add`, and `sudo agentctl matrix status` lists it
+with `-` in the INTRODUCED column.
 
 ## 1. Create the agent
 
@@ -20,8 +25,8 @@ wrote /etc/nixos/agents/scout.toml
 git: staged (commit when you are happy with it)
 wrote 1 secret(s) to /var/lib/agents/scout/secrets.env
 ==> nixos-rebuild switch --flake /etc/nixos
-agent 'scout' is up and will introduce itself to @alice:example.com on Matrix.
-Next: agentctl status scout | agentctl logs scout -f
+agent 'scout' is up and has invited @alice:example.com to !kGh...:matrix.example.org. Accept the invite in your Matrix client.
+Next: agentctl logs scout -f
 ```
 
 One provider key is enough. During the rebuild the host created the user

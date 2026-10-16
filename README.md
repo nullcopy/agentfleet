@@ -11,7 +11,7 @@ $ sudo agentctl add scout --model anthropic/claude-sonnet-5.5 --description "res
   ...
 wrote /etc/nixos/agents/scout.toml
 ==> nixos-rebuild switch --flake /etc/nixos
-agent 'scout' is up and will introduce itself to @alice:example.com on Matrix.
+agent 'scout' is up and has invited @alice:example.com to !kGh...:matrix.example.org.
 ```
 
 > **scout**: Hello! I'm scout, a Hermes agent running on `myhost`
@@ -30,7 +30,7 @@ What agentfleet is, in five points:
 4. Every agent is a Hermes agent connected to that Matrix server.
 5. You are expected to have your own Matrix id on another, pre-existing server.
 
-- [Install](docs/install.md): DNS, flake input, what to set in `configuration.nix`, the reverse proxy (Caddy), first rebuild.
+- [Install](docs/install.md): DNS, flake input, what to set in `configuration.nix`, the reverse proxy (Caddy), first rebuild, `agentctl matrix check`.
 - [End-to-end example](docs/e2e-example.md): create an agent, receive its introduction, chat, remove it.
 - [agentctl](docs/agentctl.md): every command, including the Matrix ones.
 - [A Morph-backed agent](docs/morph.md): using an OpenAI-compatible provider, and Morph's models.
@@ -45,5 +45,5 @@ agentctl start|stop|restart <name> | --all
 agentctl status [name]
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name>
-agentctl matrix [status|introduce|rotate-token|deactivate|start|stop|restart|logs]
+agentctl matrix [status|check|introduce|rotate-token|deactivate|start|stop|restart|logs]
 ```

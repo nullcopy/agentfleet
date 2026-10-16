@@ -26,7 +26,7 @@ let
     mapAttrs
     ;
 
-  stateDir = "/var/lib/agentfleet/matrix";
+  stateDir = m.stateDir;
 
   wildcards = [
     "0.0.0.0"
@@ -46,7 +46,12 @@ let
   synapseSecrets = "${stateDir}/synapse-secrets.yaml";
 
   spec = builtins.toJSON {
-    inherit (m) clientUrl serverName operator;
+    inherit (m)
+      clientUrl
+      publicBaseUrl
+      serverName
+      operator
+      ;
     inherit stateDir;
     adminLocalpart = "agentfleet";
     hostName = config.networking.hostName;
@@ -122,6 +127,13 @@ in
       defaultText = lib.literalExpression ''"http://127.0.0.1:''${listenPort}"'';
       internal = true;
       description = "URL agents and the reconciler use to reach the homeserver.";
+    };
+
+    stateDir = mkOption {
+      type = types.str;
+      default = "/var/lib/agentfleet/matrix";
+      internal = true;
+      description = "Where the reconciler keeps the admin token and per-agent account records.";
     };
 
     package = mkOption {

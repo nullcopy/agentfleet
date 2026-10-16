@@ -46,7 +46,7 @@ _agentctl() {
             ;;
         matrix)
             if (( cword == 2 )); then
-                COMPREPLY=($(compgen -W "status introduce rotate-token deactivate start stop restart logs" -- "$cur"))
+                COMPREPLY=($(compgen -W "status check introduce rotate-token deactivate start stop restart logs" -- "$cur"))
                 return
             fi
             case ${COMP_WORDS[2]} in
