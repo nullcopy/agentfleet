@@ -73,6 +73,9 @@ pkgs.testers.runNixOSTest {
     invites = sync.get("rooms", {}).get("invite", {})
     assert len(invites) == 1, invites
     room = next(iter(invites))
+    # the invite carries is_direct, so the operator's client files it as a DM
+    member = [e for e in invites[room]["invite_state"]["events"] if e["type"] == "m.room.member" and e["state_key"] == "@op:localhost"]
+    assert member and member[0]["content"].get("is_direct") is True, invites[room]
     machine.succeed(f"curl -sf -X POST -H 'Authorization: Bearer {op}' -d '{{}}' http://127.0.0.1:8008/_matrix/client/v3/join/{room}")
     msgs = json.loads(machine.succeed(f"curl -sf -H 'Authorization: Bearer {op}' 'http://127.0.0.1:8008/_matrix/client/v3/rooms/{room}/messages?dir=b&limit=10'"))
     bodies = [e["content"].get("body", "") for e in msgs["chunk"] if e["type"] == "m.room.message"]

@@ -328,8 +328,15 @@ class Synapse:
     def invite(self, token, room, operator):
         """Inviting a user on another homeserver makes Synapse talk to that
         server synchronously, which can take long or fail until federation
-        works in both directions."""
-        api(self.base, "POST", f"/_matrix/client/v3/rooms/{quote(room)}/invite", {"user_id": operator}, token=token, timeout=90)
+        works in both directions.
+
+        The invite is sent as an m.room.member state event rather than through
+        /invite: only the state event can carry is_direct, and that flag is
+        what the operator's client uses to file the room as a direct message
+        instead of a group."""
+        api(self.base, "PUT",
+            f"/_matrix/client/v3/rooms/{quote(room)}/state/m.room.member/{quote(operator)}",
+            {"membership": "invite", "is_direct": True}, token=token, timeout=90)
 
 
 # ----------------------------------------------------------------------------

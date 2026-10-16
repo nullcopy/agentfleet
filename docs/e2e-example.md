@@ -54,8 +54,9 @@ $ agentctl logs scout -n 20
 
 ## 2. The agent says hello
 
-In your Matrix client there is a new invite from `@scout:matrix.example.org`.
-Accept it. The room contains one message:
+In your Matrix client there is a new invite from `@scout:matrix.example.org`,
+filed as a direct message, not a group. Accept it. The room contains one
+message:
 
 > Hello! I'm **scout**, a Hermes agent running on `myhost`
 > (anthropic/claude-sonnet-5.5). Research assistant. This room is our direct

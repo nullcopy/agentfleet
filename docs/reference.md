@@ -96,7 +96,8 @@ definition is `sandbox` in `modules/default.nix`.
 Options under `services.agentfleet.matrix`: `serverName` (permanent),
 `operator`, `listenAddresses` (default `["127.0.0.1"]`, loopback is always
 included), `listenPort` (8008), `publicBaseUrl` (default
-`https://<serverName>`).
+`https://<serverName>`; set it when the server name is the bare domain and
+the server lives on a subdomain, see [short user ids](install.md#short-user-ids)).
 
 | unit | role |
 |---|---|
@@ -121,8 +122,10 @@ step:
 3. Sends the introduction once, in two halves. The local half, done
    immediately: a private room created by the agent, the greeting posted in
    it, and the room marked as a DM. The federated half: inviting the
-   operator, which makes Synapse contact the operator's homeserver and only
-   works once federation works in both directions. Until then the invite is
+   operator with an `m.room.member` event carrying `is_direct`, so their
+   client files the room as a DM too. The invite makes Synapse contact the
+   operator's homeserver and only works once federation works in both
+   directions. Until then the invite is
    retried on every run and by `agentctl matrix introduce <name>`, always in
    the same room, so you never receive more than one invite per agent;
    `agentctl matrix check` finds out why it fails. A failure here, or

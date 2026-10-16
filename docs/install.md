@@ -58,13 +58,12 @@ That is the proxy host's job.
 - **Ports on the fleet host.** TCP 8008 open to the proxy host only, nothing
   else. Outbound HTTPS must be allowed (federation to `example.com`, model
   providers, certificate checks).
-- **Server name.** `matrix.example.org` is both the DNS name and the Matrix
-  server name, so user ids look like `@scout:matrix.example.org`. If you would
-  rather have `@scout:example.org`, use `serverName = "example.org"` and serve
-  `https://example.org/.well-known/matrix/server` containing
-  `{"m.server": "matrix.example.org:443"}` from wherever `example.org` is
-  hosted. Either way the choice is permanent: it is baked into every user id
-  and into the database.
+- **Server name.** In the basic setup `matrix.example.org` is both the DNS
+  name and the Matrix server name, so user ids look like
+  `@scout:matrix.example.org`. For the shorter `@scout:example.org` see
+  [Short user ids](#short-user-ids) below before you rebuild. Either way the
+  choice is permanent: it is baked into every user id and into the database,
+  and changing it later means [starting the server over](#starting-the-server-over).
 
 ## 2. Add the flake input and import the module
 
@@ -137,7 +136,7 @@ What each value does:
 | `matrix.serverName`      | The part after the colon in every agent's user id. Cannot change later.                                                   |
 | `matrix.operator`        | The one Matrix user the agents accept messages and invites from, and DM when they come up. Must be on another homeserver. |
 | `matrix.listenAddresses` | Private addresses Synapse listens on, in addition to loopback. Leave it out when the proxy runs on the fleet host itself.  |
-| `matrix.publicBaseUrl`   | Only if the public URL is not `https://<serverName>`.                                                                     |
+| `matrix.publicBaseUrl`   | Only if the public URL is not `https://<serverName>`, as with [short user ids](#short-user-ids).                          |
 | `matrix.listenPort`      | Only if 8008 clashes with something; default 8008.                                                                        |
 | `extraPackages`          | Extra tools on every agent's PATH.                                                                                        |
 
@@ -261,6 +260,73 @@ account and the agents' accounts; with no agents yet it ends with
 
 Now continue with the [end-to-end example](e2e-example.md) to create your
 first agent.
+
+## Short user ids
+
+To have agents called `@scout:example.org` while the server itself keeps
+living at `matrix.example.org`, the Matrix server name becomes the bare
+domain and the public URL stays as it is:
+
+```nix
+services.agentfleet.matrix = {
+  serverName = "example.org";                       # the part after the colon in user ids
+  publicBaseUrl = "https://matrix.example.org";     # where the server actually is
+  # operator, listenAddresses as before
+};
+```
+
+Decide this before the first rebuild (step 5). Other homeservers then look up
+`https://example.org/.well-known/matrix/server`, so the two `.well-known`
+documents must be served from the bare domain, with the names spelled out
+rather than taken from the request:
+
+```caddyfile
+example.org {
+    handle /.well-known/matrix/server {
+        header Content-Type application/json
+        respond `{"m.server": "matrix.example.org:443"}` 200
+    }
+
+    handle /.well-known/matrix/client {
+        header Content-Type application/json
+        header Access-Control-Allow-Origin *
+        respond `{"m.homeserver": {"base_url": "https://matrix.example.org"}}` 200
+    }
+
+    # whatever else example.org serves goes here
+}
+```
+
+The `matrix.example.org` block from step 4 stays as it is; its own
+`.well-known` handlers are harmless. If anything in front of the proxy
+routes by host name (a DNS record, a load balancer, an SNI map), the bare
+domain needs the same treatment as `matrix.example.org`, with a certificate
+of its own. `agentctl matrix check` knows the difference: it fetches
+`.well-known` from the server name and everything else from the public URL,
+and checks that the federation endpoint reports `example.org`.
+
+## Starting the server over
+
+The server name cannot be changed in place. If you need a different one, or
+want a clean Synapse for any other reason, wipe the Matrix side; agents
+created before are best purged first, since Hermes keeps state tied to their
+old ids:
+
+```sh
+sudo agentctl purge <name> --yes                    # for each existing agent
+sudo systemctl stop agentfleet-matrix matrix-synapse
+sudo -u postgres dropdb matrix-synapse
+sudo rm -rf /var/lib/matrix-synapse /var/lib/agentfleet/matrix
+sudo systemctl restart agentfleet-matrix-secret agentfleet-matrix-db
+# now change serverName / publicBaseUrl in configuration.nix, then:
+sudo nixos-rebuild switch --flake /etc/nixos
+sudo systemctl start matrix-synapse agentfleet-matrix
+agentctl matrix check
+```
+
+This deletes every account, room and message on the fleet's server and the
+record of purged names; nothing outside `/var/lib/matrix-synapse`,
+`/var/lib/agentfleet/matrix` and that database is touched.
 
 ## Variations
 
