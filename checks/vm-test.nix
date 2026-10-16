@@ -122,5 +122,23 @@ pkgs.testers.runNixOSTest {
     machine.succeed("agentctl rm demo --yes --no-rebuild")
     machine.fail("test -e /root/flake/agents/demo.toml")
     machine.fail("agentctl rm sleeper --yes")  # defined in Nix, not removable
+
+    # leftovers of an agent removed without --purge show up and can be purged
+    machine.succeed("mkdir -p /srv/agents/ghost /var/lib/agents/ghost")
+    assert "ghost" in machine.succeed("agentctl names --removed").split()
+    assert "removed" in machine.succeed("agentctl list"), machine.succeed("agentctl list")
+    machine.succeed("agentctl purge ghost --yes")
+    machine.fail("test -d /srv/agents/ghost")
+
+    # whole-fleet and server lifecycle
+    machine.succeed("agentctl stop --all")
+    assert machine.succeed("systemctl is-active agent-sleeper.service || true").strip() == "inactive"
+    machine.succeed("agentctl start --all")
+    machine.wait_for_unit("agent-sleeper.service")
+    machine.succeed("agentctl matrix stop")
+    assert machine.succeed("systemctl is-active agent-sleeper.service || true").strip() == "inactive"
+    machine.succeed("agentctl matrix start")
+    machine.wait_for_unit("agent-sleeper.service")
+    machine.succeed("agentctl matrix logs -n 5")
   '';
 }

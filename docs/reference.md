@@ -26,11 +26,8 @@ MATRIX_FREE_RESPONSE_ROOMS = "!abc123:matrix.example.org"
 localpart = "scout2"                   # only if @scout was deactivated earlier
 ```
 
-`agentctl add` writes this file from its flags: `--model`, `--description`,
-`--memory-max`, `--cpu-quota`, `--package` (repeatable), `--env K=V`,
-`--set key=value` (dotted keys; integers and `true`/`false` become TOML
-literals, `--set-str` keeps a string), `--secret KEY` (prompted) or
-`--secret KEY=VALUE`, `--no-rebuild`.
+`agentctl add` writes this file from its flags; see [agentctl](agentctl.md)
+for the full option list.
 
 Everything in the registry, including `[settings]` and `[environment]`, is
 copied into the world-readable Nix store. Keys and tokens go in the secrets
@@ -69,32 +66,9 @@ or `OPENAI_API_KEY` is set.
 ## Other model providers
 
 Hermes talks to any OpenAI-compatible endpoint when `model.provider` is
-`custom`. The endpoint and the name of the environment variable holding its
-key go in `[settings.model]`; the key itself goes in the secrets file like a
-provider key. With `agentctl add`:
-
-```sh
-sudo agentctl add scout --model <model id as the provider names it> \
-  --set model.provider=custom \
-  --set model.base_url=https://api.example.net/v1 \
-  --set model.key_env=EXAMPLE_API_KEY \
-  --secret EXAMPLE_API_KEY --no-prompt
-  EXAMPLE_API_KEY: ********
-```
-
-which writes
-
-```toml
-[settings.model]
-provider = "custom"
-base_url = "https://api.example.net/v1"
-key_env = "EXAMPLE_API_KEY"
-```
-
-`--secret` and `agentctl secrets set` accept any variable name, not only the
-three that are prompted for by default. A bare `KEY` asks for the value with
-hidden input; `KEY=VALUE` is accepted for scripts, but it leaves the key in
-your shell history.
+`custom`, with `model.base_url` and `model.key_env` naming the endpoint and
+the environment variable that holds its key. [A Morph-backed agent](morph.md)
+walks through it; the same recipe works for any such provider.
 
 ## The sandbox
 
@@ -142,7 +116,11 @@ agentctl matrix status                 homeserver, admin, per-agent account stat
 agentctl matrix introduce <name>       resend the introduction DM
 agentctl matrix rotate-token <name>    log out every session, issue a new token, restart the agent
 agentctl matrix deactivate <name>      after `agentctl rm`: deactivate the account for good
+agentctl matrix start|stop|restart     Synapse, and with it the reconciler and every agent
+agentctl matrix logs [-f]              journal of Synapse and the reconciler
 ```
+
+Each is described in [agentctl](agentctl.md).
 
 Removal: `agentctl rm scout` locks `@scout:<serverName>` and logs it out;
 adding `scout` again unlocks the same account. `agentctl rm scout --purge`

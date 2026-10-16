@@ -384,6 +384,8 @@ let
     matrix = {
       inherit (cfg.matrix) serverName operator;
       ctl = "${cfg.matrix.package}/bin/agentfleet-matrix";
+      synapseService = "matrix-synapse.service";
+      reconcileService = "agentfleet-matrix.service";
     };
     agents =
       mapAttrs (_: ag: {

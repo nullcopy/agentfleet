@@ -325,15 +325,44 @@ def rebuild(state):
         die(f"rebuild failed (exit {r.returncode}); the registry change is still on disk", r.returncode)
 
 
+def removed_agents(state):
+    """Names that still have a home or state directory but are no longer
+    defined: removed with `rm` but not purged. They match the name regex so
+    stray directories are ignored."""
+    pattern = state.get("nameRegex", DEFAULT_NAME_REGEX)
+    found = set()
+    for base in (state["homeBase"], state["stateDir"]):
+        try:
+            entries = os.listdir(base)
+        except OSError:
+            continue
+        for n in entries:
+            if re.fullmatch(pattern, n) and os.path.isdir(os.path.join(base, n)):
+                found.add(n)
+    return sorted(found - set(state["agents"]))
+
+
+def enabled_services(state):
+    return [a["service"] for _, a in sorted(state["agents"].items()) if a.get("service")]
+
+
 # ----------------------------------------------------------------------------
 # commands
 # ----------------------------------------------------------------------------
+def cmd_names(state, args):
+    """Used by shell completion."""
+    names = removed_agents(state) if args.removed else sorted(state["agents"])
+    print("\n".join(names))
+
+
 def cmd_list(state, args):
     rows = []
     for name in sorted(state["agents"]):
         a = state["agents"][name]
         st = unit_state(a["service"]) if a.get("enabled", True) else "disabled"
         rows.append((name, st, a.get("userId", ""), a.get("model") or "", a.get("description", "")))
+    for name in removed_agents(state):
+        rows.append((name, "removed", "", "", f"leftover files; `agentctl purge {name}` deletes them"))
     if not rows:
         print("no agents defined")
         return
@@ -428,19 +457,44 @@ def cmd_rm(state, args):
         rebuild(state)
 
     if args.purge:
-        for p in (a.get("home"), a.get("stateDir")):
-            if p and os.path.isdir(p):
-                shutil.rmtree(p)
-                print(f"purged {p}")
-        if not args.no_rebuild:
-            # The rebuild above locked the account; purge deactivates it for good.
-            run([state["matrix"]["ctl"], "deactivate", args.name], check=False)
+        # The rebuild above locked the account; purge deactivates it for good.
+        purge_leftovers(state, args.name, deactivate=not args.no_rebuild)
     elif os.path.isdir(a.get("home") or ""):
         warn(
             f"{a['home']} was kept. Its files still belong to the freed UID, which a "
-            f"future agent may receive; delete or chown it, or use --purge next time"
+            f"future agent may receive; `agentctl purge {args.name}` deletes them"
         )
     print(f"agent '{args.name}' removed")
+
+
+def purge_leftovers(state, name, deactivate=True):
+    for p in (os.path.join(state["homeBase"], name), os.path.join(state["stateDir"], name)):
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+            print(f"purged {p}")
+    if deactivate:
+        r = run([state["matrix"]["ctl"], "deactivate", name], check=False, capture=True)
+        out = (r.stdout + r.stderr).strip()
+        if r.returncode != 0 and "no Matrix record" in out:
+            print(f"no Matrix account to deactivate for '{name}'")
+        elif out:
+            print(out)
+
+
+def cmd_purge(state, args):
+    need_root()
+    valid_name(state, args.name)
+    if args.name in state["agents"]:
+        die(f"agent '{args.name}' is still defined; use `agentctl rm {args.name} --purge`")
+    toml = os.path.join(state["registry"]["hostPath"], f"{args.name}.toml")
+    if os.path.exists(toml):
+        die(f"{toml} still exists; remove it with `agentctl rm {args.name} --purge`")
+    if args.name not in removed_agents(state):
+        print(f"nothing left on disk for '{args.name}'; deactivating its Matrix account if any")
+    elif not args.yes and not confirm(f"Delete home, state and secrets of removed agent '{args.name}' and deactivate its Matrix account for good?"):
+        die("aborted", 2)
+    purge_leftovers(state, args.name)
+    print(f"agent '{args.name}' purged")
 
 
 def service_or_die(a, name):
@@ -452,6 +506,15 @@ def service_or_die(a, name):
 
 def cmd_lifecycle(state, args):
     need_root()
+    if args.all:
+        units = enabled_services(state)
+        if not units:
+            die("no enabled agents")
+        systemctl(args.command, *units)
+        print(f"{args.command}ed {len(units)} agent(s)" if args.command != "stop" else f"stopped {len(units)} agent(s)")
+        return
+    if not args.name:
+        die(f"agentctl {args.command}: give an agent name or --all")
     a = get_agent(state, args.name)
     systemctl(args.command, service_or_die(a, args.name))
 
@@ -480,8 +543,27 @@ def cmd_logs(state, args):
 
 def cmd_matrix(state, args):
     need_root()
-    ctl = state["matrix"]["ctl"]
-    os.execvp(ctl, [ctl, *args.args])
+    m = state["matrix"]
+    synapse, reconcile = m["synapseService"], m["reconcileService"]
+    sub = args.sub or "status"
+    if sub in ("status", "introduce", "rotate-token", "deactivate"):
+        ctl = m["ctl"]
+        extra = [args.name] if getattr(args, "name", None) else []
+        os.execvp(ctl, [ctl, sub, *extra])
+    if sub == "stop":
+        # Agents require the server; systemd stops them with it.
+        systemctl("stop", synapse)
+        print(f"stopped {synapse} and, with it, the reconciler and every agent")
+    elif sub == "start":
+        systemctl("start", synapse, reconcile, *enabled_services(state))
+        print(f"started {synapse}, {reconcile} and every enabled agent")
+    elif sub == "restart":
+        # Restart propagates through Requires= to the reconciler and the agents.
+        systemctl("restart", synapse)
+        print(f"restarted {synapse}; the reconciler and the agents followed")
+    elif sub == "logs":
+        cmd = ["journalctl", "-f" if args.follow else "--no-pager", "-n", str(args.lines), "-u", synapse, "-u", reconcile]
+        os.execvp("journalctl", cmd)
 
 
 def cmd_secrets(state, args):
@@ -534,6 +616,10 @@ def build_parser():
     s = sub.add_parser("list", help="show all agents, their state and Matrix id")
     s.set_defaults(func=cmd_list)
 
+    s = sub.add_parser("names", help=argparse.SUPPRESS)
+    s.add_argument("--removed", action="store_true")
+    s.set_defaults(func=cmd_names)
+
     s = sub.add_parser("add", help="create an agent and rebuild", description="Create an agent: write <registry>/<name>.toml, store its provider key, rebuild the host. It then introduces itself to you on Matrix.")
     s.add_argument("name")
     s.add_argument("--model", help="Hermes model id, e.g. anthropic/claude-sonnet-5.5")
@@ -556,9 +642,15 @@ def build_parser():
     s.add_argument("--no-rebuild", action="store_true", help="remove the registry entry but do not rebuild the host")
     s.set_defaults(func=cmd_rm)
 
-    for name, help_ in (("start", "start the agent's service"), ("stop", "stop the agent's service"), ("restart", "restart the agent's service")):
+    s = sub.add_parser("purge", help="delete what `rm` left behind for an agent that no longer exists, and deactivate its Matrix account")
+    s.add_argument("name")
+    s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
+    s.set_defaults(func=cmd_purge)
+
+    for name, help_ in (("start", "start an agent, or all with --all"), ("stop", "stop an agent, or all with --all"), ("restart", "restart an agent, or all with --all")):
         s = sub.add_parser(name, help=help_)
-        s.add_argument("name")
+        s.add_argument("name", nargs="?")
+        s.add_argument("--all", action="store_true", help="every enabled agent")
         s.set_defaults(func=cmd_lifecycle)
 
     s = sub.add_parser("status", help="service status for one agent, or a table for all")
@@ -571,8 +663,25 @@ def build_parser():
     s.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_logs)
 
-    s = sub.add_parser("matrix", help="fleet Matrix server: status | introduce <name> | rotate-token <name> | deactivate <name>")
-    s.add_argument("args", nargs=argparse.REMAINDER)
+    s = sub.add_parser(
+        "matrix",
+        help="the fleet's Matrix server and the agents' accounts",
+        description="Drive the fleet's Matrix server (Synapse) and the agents' accounts on it. Without a subcommand: status.",
+    )
+    ms = s.add_subparsers(dest="sub", metavar="<subcommand>")
+    ms.add_parser("status", help="homeserver, admin account, and every agent's account state")
+    x = ms.add_parser("introduce", help="(re)send the agent's introduction DM to the operator")
+    x.add_argument("name")
+    x = ms.add_parser("rotate-token", help="log the agent out everywhere and issue it a new token")
+    x.add_argument("name")
+    x = ms.add_parser("deactivate", help="permanently deactivate the account of an agent that was removed")
+    x.add_argument("name")
+    ms.add_parser("start", help="start Synapse, the reconciler and every enabled agent")
+    ms.add_parser("stop", help="stop Synapse; the reconciler and every agent stop with it")
+    ms.add_parser("restart", help="restart Synapse; the reconciler and every agent restart with it")
+    x = ms.add_parser("logs", help="journal of Synapse and the reconciler")
+    x.add_argument("-f", "--follow", action="store_true")
+    x.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_matrix)
 
     s = sub.add_parser("secrets", help="manage the agent's provider keys")
@@ -591,8 +700,6 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-    if args.command == "matrix" and not args.args:
-        args.args = ["status"]
     state = load_state()
     args.func(state, args)
 

@@ -1,0 +1,107 @@
+#compdef agentctl
+# zsh completion for agentctl (agentfleet)
+
+_agentctl_names() {
+    local -a names
+    names=(${(f)"$(agentctl names 2>/dev/null)"})
+    _describe -t agents 'agent' names
+}
+
+_agentctl_removed() {
+    local -a names
+    names=(${(f)"$(agentctl names --removed 2>/dev/null)"})
+    _describe -t agents 'removed agent' names
+}
+
+_agentctl() {
+    local curcontext=$curcontext state line
+    typeset -A opt_args
+
+    _arguments -C \
+        '(-h --help)'{-h,--help}'[show help]' \
+        '1:command:->command' \
+        '*::arg:->args'
+
+    case $state in
+        command)
+            local -a cmds
+            cmds=(
+                'list:show all agents, their state and Matrix id'
+                'add:create an agent and rebuild'
+                'rm:remove an agent and rebuild; its Matrix account is locked'
+                'purge:delete what rm left behind and deactivate the Matrix account'
+                'start:start an agent, or all with --all'
+                'stop:stop an agent, or all with --all'
+                'restart:restart an agent, or all with --all'
+                'status:service status for one agent, or a table for all'
+                'logs:show an agent'\''s journal'
+                'matrix:the fleet'\''s Matrix server and the agents'\'' accounts'
+                'secrets:manage an agent'\''s provider keys'
+            )
+            _describe -t commands 'agentctl command' cmds
+            ;;
+        args)
+            case $line[1] in
+                add)
+                    _arguments \
+                        '1:name:' \
+                        '--model[Hermes model id]:model:' \
+                        '--description[free text]:description:' \
+                        '--memory-max[systemd MemoryMax]:size:' \
+                        '--cpu-quota[systemd CPUQuota]:percent:' \
+                        '*--package[extra nixpkgs package]:package:' \
+                        '*--env[non-secret environment variable]:K=V:' \
+                        '*--set[Hermes config.yaml key]:KEY=VAL:' \
+                        '*--set-str[config key, value kept as string]:KEY=VAL:' \
+                        '*--secret[key to store; prompted without =VALUE]:KEY[=VALUE]:' \
+                        '--no-prompt[never prompt for secrets]' \
+                        '--no-rebuild[do not rebuild the host]'
+                    ;;
+                rm)
+                    _arguments '1:agent:_agentctl_names' '--purge[also delete home, state, secrets and the Matrix account]' '(-y --yes)'{-y,--yes}'[skip confirmation]' '--no-rebuild[do not rebuild the host]'
+                    ;;
+                purge)
+                    _arguments '1:removed agent:_agentctl_removed' '(-y --yes)'{-y,--yes}'[skip confirmation]'
+                    ;;
+                start|stop|restart)
+                    _arguments '1:agent:_agentctl_names' '--all[every enabled agent]'
+                    ;;
+                status)
+                    _arguments '1:agent:_agentctl_names'
+                    ;;
+                logs)
+                    _arguments '1:agent:_agentctl_names' '(-f --follow)'{-f,--follow}'[follow]' '(-n --lines)'{-n,--lines}'[number of lines]:lines:'
+                    ;;
+                secrets)
+                    _arguments -C '1:action:(set edit list)' '2:agent:_agentctl_names' '*:KEY[=VALUE]:'
+                    ;;
+                matrix)
+                    local -a subs
+                    subs=(
+                        'status:homeserver, admin account, every agent account'
+                        'introduce:(re)send the introduction DM'
+                        'rotate-token:log the agent out everywhere, new token'
+                        'deactivate:permanently deactivate a removed agent'\''s account'
+                        'start:start Synapse, the reconciler and every enabled agent'
+                        'stop:stop Synapse and with it every agent'
+                        'restart:restart Synapse and with it every agent'
+                        'logs:journal of Synapse and the reconciler'
+                    )
+                    _arguments -C '1:subcommand:->msub' '*::marg:->margs'
+                    case $state in
+                        msub) _describe -t subcommands 'matrix subcommand' subs ;;
+                        margs)
+                            case $line[1] in
+                                introduce|rotate-token) _arguments '1:agent:_agentctl_names' ;;
+                                deactivate) _arguments '1:removed agent:_agentctl_removed' ;;
+                                logs) _arguments '(-f --follow)'{-f,--follow}'[follow]' '(-n --lines)'{-n,--lines}'[lines]:lines:' ;;
+                            esac
+                            ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_agentctl "$@"

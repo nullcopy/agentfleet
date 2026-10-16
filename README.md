@@ -32,15 +32,18 @@ What agentfleet is, in five points:
 
 - [Install](docs/install.md): DNS, flake input, what to set in `configuration.nix`, the reverse proxy (Caddy), first rebuild.
 - [End-to-end example](docs/e2e-example.md): create an agent, receive its introduction, chat, remove it.
+- [agentctl](docs/agentctl.md): every command, including the Matrix ones.
+- [A Morph-backed agent](docs/morph.md): using an OpenAI-compatible provider, and Morph's models.
 - [Reference](docs/reference.md): registry format, what an agent gets, secrets, the sandbox, how the Matrix side works.
 
 ```
 agentctl list                      agents, state, Matrix id, model
 agentctl add <name> [--model M]    create an agent: registry file, provider key, rebuild
 agentctl rm <name> [--purge]       remove it; --purge also deletes home, state, secrets and the Matrix account
-agentctl start|stop|restart <name>
+agentctl purge <name>              delete what an earlier rm left behind
+agentctl start|stop|restart <name> | --all
 agentctl status [name]
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name>
-agentctl matrix [status|introduce <name>|rotate-token <name>|deactivate <name>]
+agentctl matrix [status|introduce|rotate-token|deactivate|start|stop|restart|logs]
 ```

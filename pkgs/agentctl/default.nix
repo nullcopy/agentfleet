@@ -3,6 +3,7 @@
   python3,
   stdenvNoCC,
   makeWrapper,
+  installShellFiles,
   systemd,
   git,
 }:
@@ -12,7 +13,10 @@ stdenvNoCC.mkDerivation {
   version = "0.1.0";
   src = ./.;
   dontBuild = true;
-  nativeBuildInputs = [ makeWrapper ];
+  nativeBuildInputs = [
+    makeWrapper
+    installShellFiles
+  ];
   installPhase = ''
     install -D -m 0755 agentctl.py $out/bin/agentctl
     patchShebangs $out/bin/agentctl
@@ -24,6 +28,8 @@ stdenvNoCC.mkDerivation {
           git
         ]
       }
+    installShellCompletion --bash --name agentctl completions/agentctl.bash
+    installShellCompletion --zsh --name _agentctl completions/_agentctl
   '';
   meta = {
     description = "Operator CLI for agentfleet: create, destroy and drive per-user AI agents";
