@@ -22,7 +22,13 @@ pkgs.testers.runNixOSTest {
         # Stands in for Hermes: proves the unit, environment and token wiring
         # without building the real package.
         hermesPackage = pkgs.writeShellScriptBin "hermes" ''
-          env | grep -E '^(MATRIX|HERMES|AGENT|ANTHROPIC|GREETING)' | sort > "$HOME/env-seen"
+          {
+            env | grep -E '^(MATRIX|HERMES|AGENT|ANTHROPIC|GREETING|SHELL)' | sort
+            # Hermes's terminal tool needs a bash it can find on PATH, and
+            # runs it as a login shell.
+            echo "BASH_ON_PATH=$(command -v bash)"
+            echo "BASH_LOGIN_OK=$(bash -l -c 'echo yes' 2>/dev/null)"
+          } > "$HOME/env-seen"
           exec sleep infinity
         '';
         matrix = {
@@ -43,8 +49,8 @@ pkgs.testers.runNixOSTest {
 
     # the operator must exist for the invite to work; create one via the admin API
     admin = json.loads(machine.succeed("cat /var/lib/agentfleet/matrix/admin.json"))["access_token"]
-    machine.succeed(f"curl -sf -X PUT -H 'Authorization: Bearer {admin}' -d '{{\\"password\\":\\"oppass\\",\\"admin\\":false}}' 'http://127.0.0.1:8008/_synapse/admin/v2/users/@op:localhost'")
-    op = json.loads(machine.succeed("curl -sf -X POST -d '{\\"type\\":\\"m.login.password\\",\\"identifier\\":{\\"type\\":\\"m.id.user\\",\\"user\\":\\"op\\"},\\"password\\":\\"oppass\\"}' http://127.0.0.1:8008/_matrix/client/v3/login"))["access_token"]
+    machine.succeed(f"curl -sf -X PUT -H 'Authorization: Bearer {admin}' -d '{{\"password\":\"oppass\",\"admin\":false}}' 'http://127.0.0.1:8008/_synapse/admin/v2/users/@op:localhost'")
+    op = json.loads(machine.succeed("curl -sf -X POST -d '{\"type\":\"m.login.password\",\"identifier\":{\"type\":\"m.id.user\",\"user\":\"op\"},\"password\":\"oppass\"}' http://127.0.0.1:8008/_matrix/client/v3/login"))["access_token"]
 
     # add: no rebuild, agent up, introduced
     out = machine.succeed("agentctl add sleeper --no-prompt --model test/model --description 'test agent' --env GREETING=hello --secret ANTHROPIC_API_KEY='p@$s\"w' --set model.provider=anthropic")
@@ -65,6 +71,10 @@ pkgs.testers.runNixOSTest {
     assert env["MATRIX_DEVICE_ID"] == "AGENTFLEET" and env["MATRIX_ACCESS_TOKEN"], env
     assert env["HERMES_HOME"] == "/srv/agents/sleeper/.hermes", env
     assert env["GREETING"] == "hello" and env["ANTHROPIC_API_KEY"] == 'p@$s"w', env
+    # the account has no login shell, but the agent does: bash, not nologin
+    assert env["SHELL"].endswith("/bin/bash") and env["BASH_ON_PATH"].endswith("/bin/bash"), env
+    assert env["BASH_LOGIN_OK"] == "yes", env
+    assert "nologin" in machine.succeed("getent passwd agent-sleeper")
     assert machine.succeed("systemctl show agent@sleeper.service -p ProtectSystem").strip() == "ProtectSystem=strict"
     assert machine.succeed("systemctl show agent@sleeper.service -p User").strip() == "User=agent-sleeper"
 
@@ -81,9 +91,12 @@ pkgs.testers.runNixOSTest {
     bodies = [e["content"].get("body", "") for e in msgs["chunk"] if e["type"] == "m.room.message"]
     assert any("I'm sleeper, a Hermes agent" in b for b in bodies), bodies
 
-    # list / status / secrets round trip
+    # list / status / secrets round trip; `names` serves completion and stays out of --help
     out = machine.succeed("agentctl list")
     assert "sleeper" in out and "active" in out and "@sleeper:localhost" in out, out
+    assert machine.succeed("agentctl names").split() == ["sleeper"]
+    out = machine.succeed("agentctl --help")
+    assert "names" not in out and "SUPPRESS" not in out and "edit" in out, out
     out = machine.succeed("agentctl matrix status")
     assert "@sleeper:localhost" in out and "active" in out, out
     machine.succeed("agentctl secrets set sleeper OPENAI_API_KEY=x")
@@ -100,7 +113,7 @@ pkgs.testers.runNixOSTest {
     # reconcile is idempotent; rotation invalidates the old token
     tok = env["MATRIX_ACCESS_TOKEN"]
     machine.succeed("systemctl restart agentfleet-matrix.service")
-    assert tok == machine.succeed("awk -F'\\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
+    assert tok == machine.succeed("awk -F'\"' '/^MATRIX_ACCESS_TOKEN=/{print $2}' /var/lib/agents/sleeper/matrix.env").strip()
     machine.succeed("agentctl matrix rotate-token sleeper")
     machine.fail(f"curl -sf -H 'Authorization: Bearer {tok}' http://127.0.0.1:8008/_matrix/client/v3/account/whoami")
 

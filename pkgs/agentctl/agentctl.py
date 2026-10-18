@@ -690,10 +690,6 @@ def build_parser():
     s = sub.add_parser("list", help="show all agents, their state and Matrix id")
     s.set_defaults(func=cmd_list)
 
-    s = sub.add_parser("names", help=argparse.SUPPRESS)
-    s.add_argument("--removed", action="store_true")
-    s.set_defaults(func=cmd_names)
-
     s = sub.add_parser(
         "add",
         help="create an agent and start it",
@@ -742,7 +738,7 @@ def build_parser():
 
     s = sub.add_parser(
         "matrix",
-        help="the fleet's Matrix server and the agents' accounts",
+        help="the fleet's Matrix server and the agents' accounts: status, check, introduce, rotate-token, start, stop, restart, logs",
         description="Drive the fleet's Matrix server (Synapse) and the agents' accounts on it. Without a subcommand: status.",
     )
     ms = s.add_subparsers(dest="sub", metavar="<subcommand>")
@@ -760,7 +756,11 @@ def build_parser():
     x.add_argument("-n", "--lines", type=int, default=100)
     s.set_defaults(func=cmd_matrix)
 
-    s = sub.add_parser("secrets", help="manage an agent's provider keys")
+    s = sub.add_parser(
+        "secrets",
+        help="an agent's provider keys: set, edit, list",
+        description="Manage the secrets in /var/lib/agents/<name>/secrets.env: `set` writes keys (prompting for values), `edit` opens the file in $EDITOR, `list` prints the names. set and edit restart a running agent.",
+    )
     ss = s.add_subparsers(dest="sub", metavar="<set|edit|list>")
     ss.required = True
     x = ss.add_parser("set", help="create or update secrets; a bare KEY is prompted for; restarts a running agent")
@@ -775,6 +775,15 @@ def build_parser():
 
 
 def main():
+    # `names [--removed]` feeds the shell completions. It is handled before
+    # argparse so it stays out of --help (argparse.SUPPRESS on a subcommand
+    # prints "==SUPPRESS==" in Python 3.14).
+    if sys.argv[1:2] == ["names"]:
+        flags = sys.argv[2:]
+        if flags not in ([], ["--removed"]):
+            die("usage: agentctl names [--removed]")
+        cmd_names(load_state(), argparse.Namespace(removed=bool(flags)))
+        return
     args = build_parser().parse_args()
     state = load_state()
     args.func(state, args)
