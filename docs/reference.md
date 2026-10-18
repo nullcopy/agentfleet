@@ -57,10 +57,13 @@ these files, nothing else does.
 - `agent@<name>.service`, an instance of the template: `hermes gateway`,
   hardened, restarted on failure, requires Synapse (stopping the server stops
   the agents), ordered after the reconciler without requiring it
-- on PATH: Hermes, git, curl, jq, ripgrep, ssh, plus `extraPackages`
-- the environment `HOME`, `AGENT_NAME`, `HERMES_HOME`, `MATRIX_HOMESERVER`
-  (loopback), `MATRIX_ALLOWED_USERS` (the operator), `MATRIX_E2EE_MODE=optional`,
-  everything in `environment.env`, `secrets.env` and `matrix.env`
+- on PATH: Hermes, bash, git, curl, jq, ripgrep, ssh, plus `extraPackages`.
+  Hermes runs its terminal tool through bash; the account's own login shell
+  stays `nologin`, so `SHELL` is set to bash for the service
+- the environment `HOME`, `AGENT_NAME`, `HERMES_HOME`, `SHELL`,
+  `MATRIX_HOMESERVER` (loopback), `MATRIX_ALLOWED_USERS` (the operator),
+  `MATRIX_E2EE_MODE=optional`, everything in `environment.env`,
+  `secrets.env` and `matrix.env`
 - a Matrix account `@<localpart>:<serverName>` and an introduction DM to the
   operator
 - a start at boot, from `agentfleet-agents.service` (`agentctl start --all`)

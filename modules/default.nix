@@ -119,7 +119,7 @@ in
       type = types.listOf types.package;
       default = [ ];
       example = lib.literalExpression "[ pkgs.python3 pkgs.nodejs ]";
-      description = "Extra packages on every agent's PATH, for Hermes's tools. git, curl, jq, ripgrep and ssh are always there.";
+      description = "Extra packages on every agent's PATH, for Hermes's tools. bash, git, curl, jq, ripgrep and ssh are always there.";
     };
   };
 
@@ -143,6 +143,11 @@ in
       requires = [ "matrix-synapse.service" ];
       path = [
         cfg.hermesPackage
+        # Hermes runs its terminal tool through bash. Without one on PATH it
+        # falls back to $SHELL, which systemd sets from the user database: the
+        # agent's nologin, and every shell command fails with "This account is
+        # currently not available".
+        pkgs.bash
         pkgs.git
         pkgs.curl
         pkgs.jq
@@ -154,6 +159,9 @@ in
         AGENT_NAME = "%i";
         HOME = "${homeBase}/%i";
         HERMES_HOME = "${homeBase}/%i/.hermes";
+        # The account keeps nologin as its login shell; the agent's own shell
+        # is bash. Hermes spawns background shells from $SHELL.
+        SHELL = lib.getExe pkgs.bash;
         MATRIX_HOMESERVER = cfg.matrix.clientUrl;
         MATRIX_ALLOWED_USERS = cfg.matrix.operator;
         # Element encrypts the DMs it creates; optional mode joins them when
