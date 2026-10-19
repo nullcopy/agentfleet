@@ -4,7 +4,7 @@ _agentctl() {
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cword=$COMP_CWORD
-    local cmds="list add rm purge start stop restart status logs matrix secrets"
+    local cmds="list add edit rm purge start stop restart status reset-config logs matrix secrets"
     local cmd=${COMP_WORDS[1]}
 
     if (( cword == 1 )); then
@@ -20,9 +20,20 @@ _agentctl() {
                 --model|--description|--memory-max|--cpu-quota|--env|--set|--set-str|--secret) return ;;
             esac
             ;;
+        edit)
+            opts="--model --description --memory-max --cpu-quota --env --unset-env --set --set-str --unset --no-restart"
+            case $prev in
+                --model|--description|--memory-max|--cpu-quota|--env|--unset-env|--set|--set-str|--unset) return ;;
+            esac
+            (( cword == 2 )) && names="$(agentctl names 2>/dev/null) $(agentctl names --removed 2>/dev/null)"
+            ;;
         rm)
             opts="--purge --yes"
             names=$(agentctl names 2>/dev/null)
+            ;;
+        reset-config)
+            opts="--yes"
+            names="$(agentctl names 2>/dev/null) $(agentctl names --removed 2>/dev/null)"
             ;;
         purge)
             opts="--yes"

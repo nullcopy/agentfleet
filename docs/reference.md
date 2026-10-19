@@ -18,7 +18,11 @@ template changed, which is what a Hermes upgrade does.
 
 ```
 /srv/agents/<name>/                  home, agent-<name>:agent-<name> 0750
-  .hermes/config.yaml                seeded once by agentctl from --model and --set; Hermes owns it afterwards
+  .hermes/config.yaml                seeded once by agentctl from --model and --set; Hermes owns it afterwards;
+                                     `agentctl edit` changes it through `hermes config`, `reset-config` reseeds it
+  .hermes/profiles/                  root 0555: one agent, one profile (a second one silences the agent on Matrix)
+  .hermes/gateway_state.json         Hermes's runtime record; `list` and `status` read the Matrix adapter's state from it
+  .hermes/backups/agentctl/          what `reset-config` moved aside
 /var/lib/agents/<name>/              root 0700
   agent.json                         the definition (below)
   secrets.env                        provider keys, root 0400, from `agentctl add --secret` / `secrets set`
@@ -45,10 +49,12 @@ template changed, which is what a Hermes upgrade does.
 }
 ```
 
-`settings` and `model` are only used to seed `config.yaml`; after the first
-start Hermes rewrites that file itself. A directory under `/var/lib/agents`
-is an agent by virtue of existing; the reconciler and the boot starter read
-these files, nothing else does.
+`settings` and `model` seed `config.yaml`, which Hermes rewrites itself
+afterwards; `agentctl edit` keeps the two in step by changing both, through
+`hermes config set` on the Hermes side, and `agentctl reset-config` seeds
+the file again from them. A directory under `/var/lib/agents` is an agent by
+virtue of existing; the reconciler and the boot starter read these files,
+nothing else does.
 
 ## What an agent gets
 

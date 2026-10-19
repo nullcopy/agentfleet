@@ -10,6 +10,7 @@ and agentfleet-matrix for the rest.
 """
 
 import argparse
+import datetime
 import getpass
 import grp
 import json
@@ -360,11 +361,55 @@ def deep_merge(a, b):
     return out
 
 
+def unset_nested(d, dotted):
+    """Remove a dotted key; prune tables left empty. True if something went."""
+    parts = dotted.split(".")
+    tables = [d]
+    for p in parts[:-1]:
+        if not isinstance(tables[-1].get(p), dict):
+            return False
+        tables.append(tables[-1][p])
+    if parts[-1] not in tables[-1]:
+        return False
+    del tables[-1][parts[-1]]
+    for p, t in zip(reversed(parts[:-1]), reversed(tables[:-1])):
+        if not t[p]:
+            del t[p]
+    return True
+
+
+def flatten(d, prefix=""):
+    """{"a": {"b": 1}} -> {"a.b": 1}; empty tables are leaves."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict) and v:
+            out.update(flatten(v, f"{prefix}{k}."))
+        else:
+            out[f"{prefix}{k}"] = v
+    return out
+
+
+def hermes_home(a):
+    return os.path.join(a.home, ".hermes")
+
+
+def hermes_config_path(a):
+    return os.path.join(hermes_home(a), "config.yaml")
+
+
+def ensure_hermes_home(a):
+    pw = pwd.getpwnam(a.user)
+    d = hermes_home(a)
+    os.makedirs(d, mode=0o750, exist_ok=True)
+    os.chown(d, pw.pw_uid, pw.pw_gid)
+    return d
+
+
 def seed_hermes_config(a):
     """~/.hermes/config.yaml from model and settings, once. Hermes rewrites
     the file at runtime, so an existing one is left alone. YAML is a superset
     of JSON."""
-    path = os.path.join(a.home, ".hermes", "config.yaml")
+    path = hermes_config_path(a)
     if os.path.exists(path):
         return False
     cfg = {}
@@ -372,15 +417,120 @@ def seed_hermes_config(a):
         cfg = {"model": {"default": a.data["model"]}}
     cfg = deep_merge(cfg, a.data.get("settings") or {})
     pw = pwd.getpwnam(a.user)
-    d = os.path.dirname(path)
-    os.makedirs(d, mode=0o750, exist_ok=True)
-    os.chown(d, pw.pw_uid, pw.pw_gid)
+    ensure_hermes_home(a)
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")
     os.chmod(path, 0o600)
     os.chown(path, pw.pw_uid, pw.pw_gid)
     return True
+
+
+def profiles_dir(a):
+    return os.path.join(hermes_home(a), "profiles")
+
+
+def lock_profiles(a):
+    """One agent, one Hermes profile. A second profile under ~/.hermes/profiles
+    turns the gateway into a multiplexer that takes each profile's credentials
+    from its own files and ignores the service's Matrix token: the agent comes
+    up with no messaging platform and falls silent. The directory is root's
+    and read-only so the agent cannot create one; more agents are `agentctl
+    add`. Returns the stray profiles already there, if any."""
+    ensure_hermes_home(a)
+    d = profiles_dir(a)
+    os.makedirs(d, mode=0o555, exist_ok=True)
+    os.chown(d, 0, 0)
+    os.chmod(d, 0o555)
+    return stray_profiles(a)
+
+
+def stray_profiles(a):
+    try:
+        return sorted(n for n in os.listdir(profiles_dir(a)) if os.path.isdir(os.path.join(profiles_dir(a), n)))
+    except OSError:
+        return []
+
+
+def profiles_locked(a):
+    try:
+        st = os.stat(profiles_dir(a))
+    except OSError:
+        return False
+    return st.st_uid == 0 and not (st.st_mode & 0o222)
+
+
+def as_agent(state, a, *cmd, check=True):
+    """Run a command as the agent's user, outside the sandbox, with the HOME
+    and HERMES_HOME its service has. Output is captured."""
+    env = ["env", "-i", f"HOME={a.home}", f"HERMES_HOME={hermes_home(a)}", f"PATH={os.environ.get('PATH', '')}"]
+    return run(["runuser", "-u", a.user, "--", *env, *cmd], check=check, capture=True)
+
+
+def hermes_config(state, a, *args):
+    """`hermes config ...` as the agent: Hermes stays the only writer of its
+    own file. Returns the completed process; the caller reads returncode."""
+    return as_agent(state, a, state.get("hermes") or "hermes", "config", *args, check=False)
+
+
+def hermes_value(v):
+    """A settings leaf as `hermes config set` takes it on the command line."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def config_check(state, a):
+    """(ok, detail) from `hermes config check`; (None, "") without a config."""
+    if not os.path.exists(hermes_config_path(a)):
+        return None, ""
+    r = hermes_config(state, a, "check")
+    if r.returncode == 0:
+        return True, ""
+    lines = [l.strip() for l in (r.stderr + r.stdout).splitlines() if l.strip()]
+    detail = next((l for l in lines if "formatting error" in l or "error" in l.lower()), lines[-1] if lines else f"exit {r.returncode}")
+    return False, detail
+
+
+def gateway_state(a):
+    """Hermes's own runtime record, ~/.hermes/gateway_state.json, which the
+    gateway rewrites at least every minute while it runs."""
+    return read_json(os.path.join(hermes_home(a), "gateway_state.json")) or {}
+
+
+def older_than(iso, seconds):
+    try:
+        t = datetime.datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=datetime.timezone.utc)
+    return (datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() > seconds
+
+
+def matrix_health(a):
+    """What the running gateway says about its Matrix adapter: connected,
+    connecting, retrying, startup_failed, degraded; `none` when it enabled no
+    platform at all (a hijacked profile or a disabled platform: the agent is
+    up but deaf); `stale` when the record stopped being refreshed; `no status`
+    before the first record."""
+    st = gateway_state(a)
+    if not st:
+        return "no status"
+    if older_than(st.get("updated_at"), 120):
+        return "stale"
+    p = (st.get("platforms") or {}).get("matrix")
+    if not p:
+        return "none"
+    return p.get("state") or "unknown"
+
+
+HEALTH_HINT = {
+    "none": "Hermes enabled no messaging platform, so the agent cannot hear you",
+    "stale": "Hermes stopped refreshing its status; it may be wedged",
+    "startup_failed": "the Matrix adapter failed to start",
+    "degraded": "the Matrix adapter is degraded",
+}
 
 
 # ----------------------------------------------------------------------------
@@ -435,13 +585,23 @@ def cmd_names(state, args):
 
 def cmd_list(state, args):
     rows = []
+    hints = []
     for name, a in all_agents(state).items():
         rec = matrix_record(state, name)
         uid = rec.get("user_id") or f"@{a.data.get('localpart') or name}:{state['matrix']['serverName']}"
         if a.removed:
             rows.append((name, "removed", uid, a.data.get("model") or "", "files kept; `agentctl add` resumes, `agentctl purge` deletes"))
         elif a.exists:
-            rows.append((name, unit_state(a.unit), uid, a.data.get("model") or "", a.data.get("description", "")))
+            st = unit_state(a.unit)
+            if st == "active":
+                # The unit being up says little: Hermes may be running with no
+                # Matrix adapter. Show its own view of the connection.
+                h = matrix_health(a)
+                if h != "connected":
+                    st = f"active, matrix {h}"
+                if h in HEALTH_HINT:
+                    hints.append(f"{name}: {HEALTH_HINT[h]}; `agentctl status {name}` explains, `agentctl reset-config {name}` repairs")
+            rows.append((name, st, uid, a.data.get("model") or "", a.data.get("description", "")))
         else:
             rows.append((name, "orphan", "", "", "directory without agent.json; `agentctl purge` deletes it"))
     if not rows:
@@ -453,6 +613,8 @@ def cmd_list(state, args):
     print(fmt.format(*hdr))
     for r in rows:
         print(fmt.format(*r))
+    for h in hints:
+        warn(h)
 
 
 def cmd_add(state, args):
@@ -500,6 +662,9 @@ def cmd_add(state, args):
         print(f"wrote {len(secrets)} secret(s) to {a.secrets_file}")
     if seed_hermes_config(a):
         print(f"seeded {a.home}/.hermes/config.yaml")
+    stray = lock_profiles(a)
+    if stray:
+        warn(f"{a.home}/.hermes/profiles holds {', '.join(stray)}: a second profile silences the agent on Matrix; `agentctl reset-config {name}` moves it aside")
     apply_limits(a)
     print(("resumed" if resuming else "created") + f" agent '{name}' ({a.user}, {a.home})")
 
@@ -605,8 +770,252 @@ def cmd_lifecycle(state, args):
 def cmd_status(state, args):
     if not args.name:
         return cmd_list(state, args)
-    a = get_agent(state, args.name)
+    need_root()
+    a = get_agent(state, args.name, allow_removed=True)
+    rec = matrix_record(state, a.name)
+    uid = rec.get("user_id") or f"@{a.data.get('localpart') or a.name}:{state['matrix']['serverName']}"
+    print(f"agent:     {a.name} ({a.user}, {a.home})" + ("  [removed]" if a.removed else ""))
+    print(f"model:     {a.data.get('model') or '(none)'}")
+    print(f"service:   {unit_state(a.unit)}")
+
+    if is_active(a.unit):
+        h = matrix_health(a)
+        line = f"{h} as {uid}" if h == "connected" else h
+        if h in HEALTH_HINT:
+            line += f": {HEALTH_HINT[h]}"
+        print(f"matrix:    {line}")
+    else:
+        print(f"matrix:    {uid}, account {rec.get('state', 'pending')}")
+
+    ok, detail = config_check(state, a)
+    if ok is None:
+        print("config:    not seeded yet")
+    elif ok:
+        print("config:    ok (hermes config check)")
+    else:
+        print(f"config:    BROKEN: {detail}")
+        print(f"           Hermes runs on default settings; `agentctl reset-config {a.name}` reseeds it")
+
+    stray = stray_profiles(a)
+    locked = profiles_locked(a)
+    if stray:
+        print(f"profiles:  {', '.join(stray)}: a second profile silences the agent on Matrix; `agentctl reset-config {a.name}` moves it aside")
+    elif locked:
+        print("profiles:  locked (one agent, one profile)")
+    else:
+        print(f"profiles:  UNLOCKED: the agent could create one and silence itself; `agentctl reset-config {a.name}` locks it")
+    print()
     systemctl("status", "--no-pager", "--lines=0", a.unit, check=False)
+
+
+# ----------------------------------------------------------------------------
+# edit, reset-config
+# ----------------------------------------------------------------------------
+EDITABLE = ("model", "description", "memory_max", "cpu_quota", "environment", "settings")
+
+
+def edit_from_flags(a, args):
+    """A copy of agent.json with the flags applied."""
+    new = json.loads(json.dumps(a.data))
+    for key, val in (("model", args.model), ("description", args.description),
+                     ("memory_max", args.memory_max), ("cpu_quota", args.cpu_quota)):
+        if val is None:
+            continue
+        if val == "" and key in ("memory_max", "cpu_quota"):
+            new.pop(key, None)  # no limit
+        else:
+            new[key] = val
+    env = dict(new.get("environment") or {})
+    added = parse_kv(args.env, "--env")
+    refuse_secrets(a.name, added)
+    env.update(added)
+    for k in args.unset_env or []:
+        env.pop(k, None)
+    new["environment"] = env
+    settings = deep_merge(new.get("settings") or {}, parse_settings(a.name, args.set, args.set_str))
+    for k in args.unset or []:
+        unset_nested(settings, k)
+    new["settings"] = settings
+    return new
+
+
+def edit_in_editor(a):
+    """The editable part of agent.json in $EDITOR; the result is validated
+    before anything is applied."""
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+    doc = {k: a.data.get(k) for k in EDITABLE}
+    doc["description"] = doc["description"] or ""
+    doc["environment"] = doc["environment"] or {}
+    doc["settings"] = doc["settings"] or {}
+    fd, tmp = tempfile.mkstemp(dir=a.state_dir, prefix=".edit.", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("// agent '%s': model, description, memory_max, cpu_quota (null = no limit),\n"
+                    "// environment (non-secret; secrets are `agentctl secrets`), settings (Hermes config.yaml keys)\n" % a.name)
+            json.dump(doc, f, indent=2, sort_keys=True)
+            f.write("\n")
+        subprocess.run([*shlex.split(editor), tmp], check=True)
+        with open(tmp) as f:
+            text = "".join(l for l in f if not l.lstrip().startswith("//"))
+    finally:
+        os.remove(tmp)
+    try:
+        edited = json.loads(text)
+    except ValueError as e:
+        die(f"not valid JSON ({e}); nothing changed")
+    if not isinstance(edited, dict):
+        die("expected a JSON object; nothing changed")
+    unknown = sorted(set(edited) - set(EDITABLE))
+    if unknown:
+        die(f"unknown key(s) {', '.join(unknown)}; editable: {', '.join(EDITABLE)}; nothing changed")
+    for k in ("model", "description", "memory_max", "cpu_quota"):
+        if edited.get(k) is not None and not isinstance(edited[k], str):
+            die(f"{k} must be a string or null; nothing changed")
+    env = edited.get("environment") or {}
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        die("environment must be an object of string values; nothing changed")
+    for k in env:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
+            die(f"invalid environment variable name '{k}'; nothing changed")
+    refuse_secrets(a.name, env)
+    settings = edited.get("settings") or {}
+    if not isinstance(settings, dict):
+        die("settings must be an object; nothing changed")
+    refuse_secrets(a.name, flatten(settings))
+    new = json.loads(json.dumps(a.data))
+    for k in EDITABLE:
+        v = edited.get(k)
+        if v is None or v == {} and k in ("environment", "settings"):
+            new.pop(k, None)
+        else:
+            new[k] = v
+    new["environment"] = edited.get("environment") or {}
+    new["settings"] = settings
+    return new
+
+
+def apply_edit(state, a, new, restart=True):
+    """Store `new` as the agent's definition and make it so: environment file,
+    limits (live), Hermes settings through `hermes config`, and a restart of a
+    running agent when something it only reads at start changed."""
+    old = a.data
+    changes = []
+    old_env, new_env = old.get("environment") or {}, new.get("environment") or {}
+    old_set, new_set = flatten(old.get("settings") or {}), flatten(new.get("settings") or {})
+    if not new.get("environment"):
+        new.pop("environment", None)
+    if not new.get("settings"):
+        new.pop("settings", None)
+    new.setdefault("description", "")
+
+    model_changed = old.get("model") != new.get("model")
+    settings_changed = old_set != new_set
+    env_changed = old_env != new_env
+    limits_changed = any(old.get(k) != new.get(k) for k in ("memory_max", "cpu_quota"))
+    description_changed = old.get("description", "") != new.get("description", "")
+
+    # Hermes's file first: it can refuse (a broken config.yaml), and then
+    # nothing should have changed.
+    if (model_changed or settings_changed) and os.path.exists(hermes_config_path(a)):
+        ops = []
+        if model_changed and new.get("model"):
+            ops.append(("set", "model.default", new["model"]))
+        for k in sorted(set(old_set) | set(new_set)):
+            if k not in new_set:
+                ops.append(("unset", k, None))
+            elif old_set.get(k) != new_set[k]:
+                ops.append(("set", k, new_set[k]))
+        for op, k, v in ops:
+            r = hermes_config(state, a, op, k, hermes_value(v)) if op == "set" else hermes_config(state, a, "unset", k)
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout).strip().splitlines()
+                die(f"hermes config {op} {k} failed: {detail[-1] if detail else r.returncode}; "
+                    f"if config.yaml is broken, `agentctl reset-config {a.name}` reseeds it. Nothing changed")
+            changes.append(f"{op} {k}" + (f" = {hermes_value(v)}" if op == "set" else ""))
+
+    a.data = new
+    a.save()
+    if env_changed:
+        write_env_file(a.environment_file, new_env, header="# Managed by agentctl: the agent's non-secret environment.")
+        plus = sorted(k for k in new_env if new_env.get(k) != old_env.get(k))
+        minus = sorted(k for k in old_env if k not in new_env)
+        changes.append("environment: " + ", ".join([f"+{k}" for k in plus] + [f"-{k}" for k in minus]))
+    if limits_changed:
+        apply_limits(a)
+        changes.append(f"limits: memory_max={new.get('memory_max') or 'none'} cpu_quota={new.get('cpu_quota') or 'none'} (applied live)")
+    if description_changed:
+        changes.append("description")
+    if model_changed and not any(c.startswith("set model.default") for c in changes):
+        changes.append(f"model: {new.get('model') or '(none)'} (config.yaml not seeded yet; used when it is)")
+
+    if not changes:
+        print("nothing changed")
+        return
+    for c in changes:
+        print(c)
+    needs_restart = model_changed or settings_changed or env_changed
+    if needs_restart and is_active(a.unit):
+        if restart:
+            systemctl("restart", a.unit)
+            print(f"restarted {a.unit}")
+        else:
+            print(f"not restarted (--no-restart); the change applies at the next `agentctl restart {a.name}`")
+
+
+def cmd_edit(state, args):
+    need_root()
+    a = get_agent(state, args.name, allow_removed=True)
+    flagged = any(getattr(args, f) not in (None, [], False) for f in
+                  ("model", "description", "memory_max", "cpu_quota", "env", "unset_env", "set", "set_str", "unset"))
+    new = edit_from_flags(a, args) if flagged else edit_in_editor(a)
+    apply_edit(state, a, new, restart=not args.no_restart)
+
+
+def cmd_reset_config(state, args):
+    need_root()
+    a = get_agent(state, args.name, allow_removed=True)
+    stray = stray_profiles(a)
+    what = "reseed its config.yaml from the stored model and settings (the current file is kept as a backup)"
+    if stray:
+        what += f" and move the profile(s) {', '.join(stray)} aside"
+    if not args.yes and not confirm(f"Reset agent '{a.name}': {what}?"):
+        die("aborted", 2)
+
+    was_active = is_active(a.unit)
+    if was_active:
+        systemctl("stop", a.unit)
+        print(f"stopped {a.unit}")
+
+    pw = pwd.getpwnam(a.user)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backups = os.path.join(hermes_home(a), "backups", "agentctl")
+    ensure_hermes_home(a)
+    for d in (os.path.dirname(backups), backups):
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chown(d, pw.pw_uid, pw.pw_gid)
+
+    cfg = hermes_config_path(a)
+    if os.path.exists(cfg):
+        dst = os.path.join(backups, f"config.yaml.{stamp}")
+        os.replace(cfg, dst)
+        print(f"moved config.yaml to {dst}")
+    for n in stray:
+        dst_dir = os.path.join(backups, f"profiles.{stamp}")
+        os.makedirs(dst_dir, mode=0o700, exist_ok=True)
+        os.chown(dst_dir, pw.pw_uid, pw.pw_gid)
+        shutil.move(os.path.join(profiles_dir(a), n), os.path.join(dst_dir, n))
+        print(f"moved profile {n} to {dst_dir}")
+    lock_profiles(a)
+    if seed_hermes_config(a):
+        print(f"seeded {cfg}")
+
+    if was_active:
+        systemctl("start", a.unit)
+        time.sleep(1)
+        if not is_active(a.unit):
+            warn(f"agent '{a.name}' did not stay up ({unit_state(a.unit)}); see `agentctl logs {a.name}`")
+            sys.exit(1)
+        print(f"started {a.unit}")
 
 
 def cmd_logs(state, args):
@@ -708,6 +1117,26 @@ def build_parser():
     s.add_argument("--no-start", action="store_true", help="create everything but do not start the agent")
     s.set_defaults(func=cmd_add)
 
+    s = sub.add_parser(
+        "edit",
+        help="change an agent: model, description, limits, environment, Hermes settings; without flags, in $EDITOR",
+        description="Change an agent in place. Flags change one thing each; with no flags the editable part of its "
+        "definition opens in $EDITOR as JSON. Model and settings go through `hermes config set` so Hermes stays the "
+        "owner of config.yaml; limits apply live; environment and model changes restart a running agent.",
+    )
+    s.add_argument("name")
+    s.add_argument("--model", help="Hermes model id")
+    s.add_argument("--description", help="free text shown in `agentctl list`")
+    s.add_argument("--memory-max", metavar="SIZE", help="systemd MemoryMax, e.g. 4G; '' removes the limit")
+    s.add_argument("--cpu-quota", metavar="PCT", help="systemd CPUQuota, e.g. 200%%; '' removes the limit")
+    s.add_argument("--env", action="append", metavar="K=V", help="set a non-secret environment variable (repeatable)")
+    s.add_argument("--unset-env", action="append", metavar="K", help="remove an environment variable (repeatable)")
+    s.add_argument("--set", action="append", metavar="KEY=VAL", help="Hermes config.yaml key, dotted; integers and true/false become literals (repeatable)")
+    s.add_argument("--set-str", action="append", metavar="KEY=VAL", help="like --set but the value stays a string")
+    s.add_argument("--unset", action="append", metavar="KEY", help="remove a Hermes config.yaml key (repeatable)")
+    s.add_argument("--no-restart", action="store_true", help="do not restart a running agent; the change applies at its next restart")
+    s.set_defaults(func=cmd_edit)
+
     s = sub.add_parser("rm", help="stop and remove an agent; files and Matrix account are kept unless --purge")
     s.add_argument("name")
     s.add_argument("--purge", action="store_true", help="delete home, state and secrets, leave its rooms, and retire the name for good")
@@ -726,9 +1155,20 @@ def build_parser():
         s.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
         s.set_defaults(func=cmd_lifecycle)
 
-    s = sub.add_parser("status", help="service status for one agent, or a table for all")
+    s = sub.add_parser("status", help="one agent: Matrix connection, config check, profile lock, service status; or the table for all")
     s.add_argument("name", nargs="?")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser(
+        "reset-config",
+        help="reseed an agent's config.yaml from its definition and move stray Hermes profiles aside",
+        description="Repair an agent whose Hermes side went wrong: its config.yaml is replaced by what agentctl would seed "
+        "from the stored model and settings (the old file is kept under ~/.hermes/backups/agentctl), any extra profile "
+        "under ~/.hermes/profiles is moved there too and the directory locked again, and a running agent is restarted.",
+    )
+    s.add_argument("name")
+    s.add_argument("--yes", "-y", action="store_true", help="skip confirmation")
+    s.set_defaults(func=cmd_reset_config)
 
     s = sub.add_parser("logs", help="show the agent's journal")
     s.add_argument("name")

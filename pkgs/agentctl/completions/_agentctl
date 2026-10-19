@@ -28,15 +28,17 @@ _agentctl() {
             cmds=(
                 'list:show all agents, their state and Matrix id'
                 'add:create an agent and start it'
+                'edit:change model, description, limits, environment or Hermes settings; no flags opens $EDITOR'
                 'rm:stop and remove an agent; files and account kept unless --purge'
                 'purge:delete what rm left behind and retire the name for good'
                 'start:start an agent, or all with --all'
                 'stop:stop an agent, or all with --all'
                 'restart:restart an agent, or all with --all'
-                'status:service status for one agent, or a table for all'
+                'status:Matrix connection, config check, profile lock and service status; or the table for all'
+                'reset-config:reseed config.yaml from the definition and move stray profiles aside'
                 'logs:show an agent'\''s journal'
                 'matrix:the fleet'\''s Matrix server and the agents'\'' accounts'
-                'secrets:manage an agent'\''s provider keys'
+                'secrets:an agent'\''s provider keys: set, edit, list'
             )
             _describe -t commands 'agentctl command' cmds
             ;;
@@ -56,8 +58,25 @@ _agentctl() {
                         '--no-prompt[never prompt for secrets]' \
                         '--no-start[create but do not start]'
                     ;;
+                edit)
+                    _arguments \
+                        '1:agent:_agentctl_names' \
+                        '--model[Hermes model id]:model:' \
+                        '--description[free text]:description:' \
+                        '--memory-max[systemd MemoryMax; empty removes]:size:' \
+                        '--cpu-quota[systemd CPUQuota; empty removes]:percent:' \
+                        '*--env[set a non-secret environment variable]:K=V:' \
+                        '*--unset-env[remove an environment variable]:K:' \
+                        '*--set[Hermes config.yaml key]:KEY=VAL:' \
+                        '*--set-str[config key, value kept as string]:KEY=VAL:' \
+                        '*--unset[remove a config.yaml key]:KEY:' \
+                        '--no-restart[do not restart a running agent]'
+                    ;;
                 rm)
                     _arguments '1:agent:_agentctl_names' '--purge[delete everything and retire the name]' '(-y --yes)'{-y,--yes}'[skip confirmation]'
+                    ;;
+                reset-config)
+                    _arguments '1:agent:_agentctl_names' '(-y --yes)'{-y,--yes}'[skip confirmation]'
                     ;;
                 purge)
                     _arguments '1:removed agent:_agentctl_removed' '(-y --yes)'{-y,--yes}'[skip confirmation]'

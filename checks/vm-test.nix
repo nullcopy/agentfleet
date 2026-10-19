@@ -22,6 +22,19 @@ pkgs.testers.runNixOSTest {
         # Stands in for Hermes: proves the unit, environment and token wiring
         # without building the real package.
         hermesPackage = pkgs.writeShellScriptBin "hermes" ''
+          # `hermes config check|set|unset` as agentctl calls them, on the
+          # JSON agentctl seeds (the real Hermes writes YAML).
+          cfg="$HERMES_HOME/config.yaml"
+          jq=${pkgs.jq}/bin/jq
+          case "$1 $2" in
+            "config check") exec $jq -e . "$cfg" > /dev/null ;;
+            "config set")
+              $jq --arg k "$3" --arg v "$4" 'setpath($k | split("."); ($v | tonumber? // (if $v == "true" then true elif $v == "false" then false else $v end)))' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+              exit $? ;;
+            "config unset")
+              $jq --arg k "$3" 'delpaths([$k | split(".")])' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+              exit $? ;;
+          esac
           {
             env | grep -E '^(MATRIX|HERMES|AGENT|ANTHROPIC|GREETING|SHELL)' | sort
             # Hermes's terminal tool needs a bash it can find on PATH, and
@@ -29,6 +42,10 @@ pkgs.testers.runNixOSTest {
             echo "BASH_ON_PATH=$(command -v bash)"
             echo "BASH_LOGIN_OK=$(bash -l -c 'echo yes' 2>/dev/null)"
           } > "$HOME/env-seen"
+          # The runtime record the real gateway keeps and `agentctl list`
+          # reads; ~/no-matrix simulates a gateway that enabled no platform.
+          if [ -e "$HOME/no-matrix" ]; then platforms='{}'; else platforms='{"matrix": {"state": "connected"}}'; fi
+          printf '{"gateway_state": "running", "platforms": %s, "updated_at": "%s"}\n' "$platforms" "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "$HERMES_HOME/gateway_state.json"
           exec sleep infinity
         '';
         matrix = {
@@ -102,13 +119,58 @@ pkgs.testers.runNixOSTest {
     machine.succeed("agentctl secrets set sleeper OPENAI_API_KEY=x")
     assert machine.succeed("agentctl secrets list sleeper").split() == ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 
+    # edit: description and limits land without a restart; environment restarts;
+    # model and settings go through `hermes config` and into agent.json
+    started = machine.succeed("systemctl show agent@sleeper.service -p ExecMainStartTimestampMonotonic").strip()
+    machine.succeed("agentctl edit sleeper --description edited --memory-max 2G")
+    assert machine.succeed("systemctl show agent@sleeper.service -p ExecMainStartTimestampMonotonic").strip() == started
+    assert machine.succeed("systemctl show agent@sleeper.service -p MemoryMax").strip() == "MemoryMax=2147483648"
+    assert "edited" in machine.succeed("agentctl list")
+    machine.succeed("agentctl edit sleeper --env GREETING=bye")
+    machine.wait_for_unit("agent@sleeper.service")
+    machine.wait_until_succeeds("grep -q '^GREETING=bye$' /srv/agents/sleeper/env-seen")
+    machine.succeed("agentctl edit sleeper --model test/other --set terminal.timeout=99 --unset model.provider --no-restart")
+    cfg = json.loads(machine.succeed("cat /srv/agents/sleeper/.hermes/config.yaml"))
+    assert cfg["model"] == {"default": "test/other"} and cfg["terminal"]["timeout"] == 99, cfg
+    assert machine.succeed("stat -c %U /srv/agents/sleeper/.hermes/config.yaml").strip() == "agent-sleeper"
+    aj = json.loads(machine.succeed("cat /var/lib/agents/sleeper/agent.json"))
+    assert aj["model"] == "test/other" and aj["settings"] == {"terminal": {"timeout": 99}} and aj["environment"] == {"GREETING": "bye"}, aj
+    machine.fail("agentctl edit sleeper --env OPENAI_API_KEY=x")
+
+    # one agent, one profile: a second profile would silence the agent on Matrix
+    assert machine.succeed("stat -c %U:%a /srv/agents/sleeper/.hermes/profiles").strip() == "root:555"
+    machine.fail("runuser -u agent-sleeper -- mkdir /srv/agents/sleeper/.hermes/profiles/tester")
+    out = machine.succeed("agentctl status sleeper")
+    assert "matrix:    connected as @sleeper:localhost" in out and "config:    ok" in out and "profiles:  locked" in out, out
+
+    # a broken config.yaml and a stray profile: status says so, edit refuses,
+    # reset-config repairs; list shows Hermes's own view of Matrix
+    machine.succeed("printf '{\"model\": {\"default\": \"x\"}\\ndisplay:\\n' > /srv/agents/sleeper/.hermes/config.yaml")
+    machine.succeed("mkdir -p /srv/agents/sleeper/.hermes/profiles/tester")
+    out = machine.succeed("agentctl status sleeper")
+    assert "config:    BROKEN" in out and "profiles:  tester" in out, out
+    machine.fail("agentctl edit sleeper --model test/again")
+    assert json.loads(machine.succeed("cat /var/lib/agents/sleeper/agent.json"))["model"] == "test/other"
+    machine.succeed("agentctl reset-config sleeper --yes")
+    machine.wait_for_unit("agent@sleeper.service")
+    cfg = json.loads(machine.succeed("cat /srv/agents/sleeper/.hermes/config.yaml"))
+    assert cfg == {"model": {"default": "test/other"}, "terminal": {"timeout": 99}}, cfg
+    machine.succeed("ls /srv/agents/sleeper/.hermes/backups/agentctl/config.yaml.* /srv/agents/sleeper/.hermes/backups/agentctl/profiles.*/tester")
+    machine.fail("test -e /srv/agents/sleeper/.hermes/profiles/tester")
+    out = machine.succeed("agentctl status sleeper")
+    assert "config:    ok" in out and "profiles:  locked" in out, out
+    machine.succeed("touch /srv/agents/sleeper/no-matrix && agentctl restart sleeper")
+    machine.wait_until_succeeds("agentctl list 2>&1 | grep -q 'active, matrix none'")
+    machine.succeed("rm /srv/agents/sleeper/no-matrix && agentctl restart sleeper")
+    machine.wait_until_succeeds("agentctl list | grep -Eq '^sleeper +active +@sleeper'")
+
     # a second agent does not restart the first; limits land as a drop-in
     started = machine.succeed("systemctl show agent@sleeper.service -p ExecMainStartTimestampMonotonic").strip()
     machine.succeed("agentctl add demo --no-prompt --model test/m --memory-max 1G")
     machine.wait_for_unit("agent@demo.service")
     assert machine.succeed("systemctl show agent@sleeper.service -p ExecMainStartTimestampMonotonic").strip() == started
     assert machine.succeed("systemctl show agent@demo.service -p MemoryMax").strip() == "MemoryMax=1073741824"
-    assert machine.succeed("systemctl show agent@sleeper.service -p MemoryMax").strip() == "MemoryMax=infinity"
+    assert machine.succeed("systemctl show agent@sleeper.service -p MemoryMax").strip() == "MemoryMax=2147483648"  # from the edit above
 
     # reconcile is idempotent; rotation invalidates the old token
     tok = env["MATRIX_ACCESS_TOKEN"]

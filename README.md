@@ -39,10 +39,12 @@ What agentfleet is, in five points:
 ```
 agentctl list                      agents, state, Matrix id, model
 agentctl add <name> [--model M]    create an agent and start it; the same name after `rm` resumes it
+agentctl edit <name> [--model M]   change model, description, limits, environment or Hermes settings in place
 agentctl rm <name> [--purge]       stop and remove it; --purge also deletes everything and retires the name
 agentctl purge <name>              same as rm --purge, also for an agent removed earlier
 agentctl start|stop|restart <name> | --all
-agentctl status [name]
+agentctl status [name]             one agent: Matrix connection, config check, service; or the table
+agentctl reset-config <name>       reseed config.yaml and move stray Hermes profiles aside: repairs a silent agent
 agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name>
 agentctl matrix [status|check|introduce|rotate-token|start|stop|restart|logs]

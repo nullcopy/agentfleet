@@ -6,6 +6,7 @@
   installShellFiles,
   systemd,
   shadow,
+  util-linux,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -26,6 +27,7 @@ stdenvNoCC.mkDerivation {
           python3
           systemd
           shadow
+          util-linux # runuser: `hermes config` as the agent
         ]
       }
     installShellCompletion --bash --name agentctl completions/agentctl.bash

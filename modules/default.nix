@@ -89,6 +89,9 @@ let
       unitTemplate
       ;
     nologin = lib.getExe' pkgs.shadow "nologin";
+    # agentctl runs `hermes config` as the agent for `edit`, `status` and
+    # `reset-config`, so Hermes stays the only thing that writes config.yaml.
+    hermes = lib.getExe' cfg.hermesPackage "hermes";
     hostName = config.networking.hostName;
     secrets = providerSecrets;
     matrix = {
