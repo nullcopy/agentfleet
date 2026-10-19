@@ -256,7 +256,7 @@ mean:
 
 For reference, `sudo agentctl matrix status` shows the server, the admin
 account and the agents' accounts; with no agents yet it ends with
-`no matrix agents`, and `agentctl list` says `no agents`.
+`no matrix agents`, and `sudo agentctl list` says `no agents`.
 
 Now continue with the [end-to-end example](e2e-example.md) to create your
 first agent.

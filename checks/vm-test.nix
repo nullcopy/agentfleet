@@ -114,6 +114,14 @@ pkgs.testers.runNixOSTest {
     assert machine.succeed("agentctl names").split() == ["sleeper"]
     out = machine.succeed("agentctl --help")
     assert "names" not in out and "SUPPRESS" not in out and "edit" in out, out
+    # completion runs as whoever is typing: names come without root, and the
+    # installed bash completion offers them to every command that takes one
+    machine.fail("runuser -u nobody -- agentctl list")
+    assert machine.succeed("runuser -u nobody -- agentctl names").split() == ["sleeper"]
+    comp = "source /run/current-system/sw/share/bash-completion/completions/agentctl; COMP_WORDS=(agentctl %s s); COMP_CWORD=2; _agentctl; echo \"''${COMPREPLY[*]}\""
+    for cmd in ("edit", "rm", "start", "status", "logs", "reset-config"):
+        out = machine.succeed(f"runuser -u nobody -- bash -c '{comp % cmd}'")
+        assert out.split() == ["sleeper"], (cmd, out)
     out = machine.succeed("agentctl matrix status")
     assert "@sleeper:localhost" in out and "active" in out, out
     machine.succeed("agentctl secrets set sleeper OPENAI_API_KEY=x")
@@ -182,6 +190,7 @@ pkgs.testers.runNixOSTest {
     # rm keeps everything and locks; add resumes the same account and room
     machine.succeed("agentctl rm demo --yes")
     assert "removed" in machine.succeed("agentctl list")
+    assert machine.succeed("runuser -u nobody -- agentctl names --removed").split() == ["demo"]
     machine.succeed("id agent-demo && test -d /srv/agents/demo")
     assert "locked" in machine.succeed("agentctl matrix status")
     rec = json.loads(machine.succeed("cat /var/lib/agentfleet/matrix/agents/demo.json"))

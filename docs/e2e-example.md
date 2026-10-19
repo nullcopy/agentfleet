@@ -36,7 +36,7 @@ token where only root and the agent's service can read it, and started
 Hermes. Nothing was rebuilt and no other agent noticed:
 
 ```
-$ agentctl list
+$ sudo agentctl list
 NAME   STATE   MATRIX                     MODEL                         DESCRIPTION
 scout  active  @scout:matrix.example.org  anthropic/claude-sonnet-5.5   research assistant
 

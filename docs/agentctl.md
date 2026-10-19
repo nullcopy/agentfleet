@@ -3,9 +3,11 @@
 `agentctl` runs on the fleet host. It reads `/etc/agents/state.json`, which
 the NixOS module renders with the host's fixed facts, and otherwise only
 touches `/var/lib/agents`, `/srv/agents`, the system user database, systemd
-and the Matrix reconciler. Nothing it does rebuilds the system. Commands that
-change anything need root. Tab completion for bash and zsh is installed with
-the package; agent names complete.
+and the Matrix reconciler. Nothing it does rebuilds the system. Everything
+except `matrix check` needs root, `list` included, because the agents' state
+is root-only. Tab completion for bash and zsh is installed with the package
+and works for whoever is typing: commands, flags and agent names complete,
+`sudo agentctl <Tab>` too.
 
 ```
 agentctl list

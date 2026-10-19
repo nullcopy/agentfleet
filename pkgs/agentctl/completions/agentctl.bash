@@ -70,7 +70,8 @@ _agentctl() {
     if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W "$opts --help" -- "$cur"))
     else
-        COMPREPLY=($(compgen -W "$names" -- "$cur"))
+        # without root, `names` and `names --removed` may overlap
+        COMPREPLY=($(compgen -W "$names" -- "$cur" | sort -u))
     fi
 }
 complete -F _agentctl agentctl

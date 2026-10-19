@@ -576,14 +576,47 @@ def apply_limits(a):
 # ----------------------------------------------------------------------------
 # commands
 # ----------------------------------------------------------------------------
+def home_names(state):
+    """Agent names from the homes under /srv/agents, which anyone may list;
+    every agent has one, removed agents included."""
+    pattern = state.get("nameRegex", DEFAULT_NAME_REGEX)
+    try:
+        return sorted(n for n in os.listdir(state["homeBase"])
+                      if re.fullmatch(pattern, n) and os.path.isdir(os.path.join(state["homeBase"], n)))
+    except OSError:
+        return []
+
+
+def running_names(state):
+    """Names whose unit is active, from systemd, no root needed."""
+    prefix, suffix = state["unitTemplate"].split("%s", 1)
+    r = systemctl("list-units", "--plain", "--no-legend", "--state=active", f"{prefix}*{suffix}", check=False, capture=True)
+    out = []
+    for line in r.stdout.splitlines():
+        unit = line.split()[0] if line.split() else ""
+        if unit.startswith(prefix) and unit.endswith(suffix):
+            out.append(unit[len(prefix):len(unit) - len(suffix)])
+    return out
+
+
 def cmd_names(state, args):
-    """Used by shell completion."""
+    """Feeds shell completion, which runs as whoever is typing. With root the
+    answer is exact: active or removed agents from agent.json. Without root
+    /var/lib/agents is closed, so the homes stand in, and `--removed` means
+    "no running unit", which is close enough to complete a name."""
     agents = all_agents(state)
-    names = [n for n, a in agents.items() if (a.removed if args.removed else a.active)]
+    if agents or os.geteuid() == 0:
+        names = [n for n, a in agents.items() if (a.removed if args.removed else a.active)]
+    else:
+        names = home_names(state)
+        if args.removed:
+            running = set(running_names(state))
+            names = [n for n in names if n not in running]
     print("\n".join(names))
 
 
 def cmd_list(state, args):
+    need_root()  # the agents' state is root-only; without it the list would be empty, not short
     rows = []
     hints = []
     for name, a in all_agents(state).items():
