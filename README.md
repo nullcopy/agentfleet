@@ -49,3 +49,7 @@ agentctl logs <name> [-f] [-n N]
 agentctl secrets set|edit|list <name>
 agentctl matrix [status|check|introduce|rotate-token|start|stop|restart|logs]
 ```
+
+## License
+
+This project is licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`).
